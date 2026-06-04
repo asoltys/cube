@@ -1,3 +1,4 @@
+pub mod call_execution;
 pub mod config_execution;
 pub mod deploy_execution;
 pub mod liftup_execution;

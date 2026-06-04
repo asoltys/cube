@@ -1,7 +1,9 @@
 use crate::constructive::core_types::valtypes::val::long_val::ape::decode::error::decode_error::LongValAPEDecodeError;
 use crate::constructive::core_types::valtypes::val::short_val::ape::decode::error::decode_error::ShortValAPEDecodeError;
 use crate::constructive::entry::entry::ext::codec::ape::decode::error::decode_error::EntryAPEDecodeError;
+use crate::constructive::entries::entry_kinds::call::ext::signature::sighash::error::sighash_error::CallSighashError;
 use crate::constructive::entry::entry_kinds::config::ext::signature::sighash::error::sighash_error::ConfigSighashError;
+use crate::executive::entry_executions::call_execution::error::call_execution_error::CallExecutionError;
 use crate::constructive::entry::entry_kinds::deploy::ext::signature::sighash::error::sighash_error::DeploySighashError;
 use crate::constructive::entries::entry_kinds::liftup::ext::signature::sighash::error::sighash_error::LiftupSighashError;
 use crate::constructive::entries::entry_kinds::r#move::ext::signature::sighash::error::sighash_error::MoveSighashError;
@@ -54,6 +56,8 @@ pub enum BatchExecutionError {
     DeploySighashError(DeploySighashError),
     ConfigExecutionError(ConfigExecutionError),
     ConfigSighashError(ConfigSighashError),
+    CallExecutionError(CallExecutionError),
+    CallSighashError(CallSighashError),
     AggregateBLSSignatureVerificationError,
     ExecutedEntryIdError,
     ApplyChangesError(ApplyChangesError),

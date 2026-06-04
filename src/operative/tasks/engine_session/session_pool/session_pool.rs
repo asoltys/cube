@@ -1,6 +1,7 @@
 use crate::constructive::bitcoiny::batch_container::batch_container::BatchContainer;
 use crate::constructive::bitcoiny::batch_txn::signed_batch_txn::signed_batch_txn::SignedBatchTxn;
 use crate::constructive::entry::entry::entry::Entry;
+use crate::constructive::entry::entry_kinds::call::call::Call;
 use crate::constructive::entry::entry_kinds::config::config::Config;
 use crate::constructive::entry::entry_kinds::deploy::deploy::Deploy;
 use crate::constructive::entry::entry_kinds::liftup::liftup::Liftup;
@@ -25,6 +26,7 @@ use crate::inscriptive::utxo_set::utxo_set::UTXO_SET;
 use crate::operative::tasks::engine_session::session_pool::error::exec_liftup_in_pool_error::ExecLiftupInPoolError;
 use crate::operative::tasks::engine_session::session_pool::error::exec_move_in_pool_error::ExecMoveInPoolError;
 use crate::operative::tasks::engine_session::session_pool::error::exec_config_in_pool_error::ExecConfigInPoolError;
+use crate::operative::tasks::engine_session::session_pool::error::exec_call_in_pool_error::ExecCallInPoolError;
 use crate::operative::tasks::engine_session::session_pool::error::exec_deploy_in_pool_error::ExecDeployInPoolError;
 use crate::operative::tasks::engine_session::session_pool::error::exec_swapout_in_pool_error::ExecSwapoutInPoolError;
 use crate::operative::tasks::engine_session::session_pool::error::into_batch_container_error::IntoBatchContainerError;
@@ -779,6 +781,74 @@ impl SessionPool {
                 Err(ExecDeployInPoolError::DeployExecutionError(format!(
                     "{error:?}"
                 )))
+            }
+        }
+    }
+
+    /// Executes a `Call` entry into the current batch session.
+    pub async fn exec_call_in_pool(
+        &mut self,
+        call: &Call,
+        call_bls_signature: [u8; 96],
+    ) -> Result<(EntryId, Entry, BatchHeight, BatchTimestamp), ExecCallInPoolError> {
+        match self.state {
+            SessionPoolState::Inactive => return Err(ExecCallInPoolError::SessionInactiveError),
+            SessionPoolState::Suspended => return Err(ExecCallInPoolError::SessionSuspendedError),
+            SessionPoolState::Break => return Err(ExecCallInPoolError::SessionBreakError),
+            _ => {
+                if self.added_entries.len() >= MAX_IN_POOL_ENTRIES {
+                    return Err(ExecCallInPoolError::PoolOverloadedError);
+                }
+            }
+        };
+
+        let (batch_height, batch_timestamp, _) = self
+            .batch_info
+            .ok_or(ExecCallInPoolError::BatchInfoNotFoundError)?;
+
+        call.bls_verify(call_bls_signature)
+            .map_err(|err| ExecCallInPoolError::CallBLSVerifyError(format!("{err:?}")))?;
+
+        call.account
+            .validate_root_account(&self.registery, &self.graveyard)
+            .await
+            .map_err(|err| ExecCallInPoolError::CallValidateRootAccountError(format!("{err:?}")))?;
+
+        if let Err((targeted_at_batch_height, execution_batch_height)) =
+            call.target.validate(batch_height)
+        {
+            return Err(ExecCallInPoolError::CallValidateTargetError {
+                targeted_at_batch_height,
+                execution_batch_height,
+            });
+        }
+
+        {
+            let mut _exec_ctx = self.exec_ctx.lock().await;
+            _exec_ctx.pre_execution().await;
+        }
+
+        let call_result = {
+            let mut exec_ctx = self.exec_ctx.lock().await;
+            exec_ctx.execute_call(call, batch_timestamp).await
+        };
+
+        match call_result {
+            Ok(call_entry) => {
+                let entry_index_in_batch = self.added_entries.len() as u32;
+                let entry_id = call_entry
+                    .entry_id(batch_height, entry_index_in_batch)
+                    .ok_or(ExecCallInPoolError::EntryIdDerivationError)?;
+                self.added_entries.push(call_entry.clone());
+                self.added_individual_entry_bls_signatures
+                    .push(call_bls_signature);
+                Ok((entry_id, call_entry, batch_height, batch_timestamp))
+            }
+            Err(error) => {
+                {
+                    self.exec_ctx.lock().await.rollback_last().await;
+                }
+                Err(ExecCallInPoolError::CallExecutionError(format!("{error:?}")))
             }
         }
     }

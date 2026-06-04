@@ -4,6 +4,7 @@ use crate::constructive::core_types::valtypes::val::long_val::long_val::LongVal;
 use crate::constructive::core_types::valtypes::val::short_val::short_val::ShortVal;
 use crate::constructive::entry::entry::entry::Entry;
 use crate::constructive::entry::entry_fees::entry_fees::EntryFees;
+use crate::constructive::entry::entry_kinds::call::call::Call;
 use crate::constructive::entry::entry_kinds::config::config::Config;
 use crate::constructive::entry::entry_kinds::deploy::deploy::Deploy;
 use crate::constructive::txn::ext::OutpointExt;
@@ -26,6 +27,7 @@ use crate::{
     constructive::entry::entry_kinds::liftup::liftup::Liftup,
     constructive::entry::entry_kinds::r#move::r#move::Move,
     constructive::entry::entry_kinds::swapout::swapout::Swapout,
+    executive::entry_executions::call_execution::error::call_execution_error::CallExecutionError,
     executive::entry_executions::config_execution::error::config_execution_error::ConfigExecutionError,
     executive::entry_executions::deploy_execution::error::deploy_execution_error::DeployExecutionError,
     executive::entry_executions::liftup_execution::error::liftup_execution_error::LiftupExecutionError,
@@ -710,7 +712,23 @@ impl ExecCtx {
                         Err(error) => return Err(BatchExecutionError::ConfigExecutionError(error)),
                     }
                 }
-                _ => panic!("Not implemented yet."),
+                Entry::Call(call) => {
+                    match self.execute_call_internal(&call, batch_timestamp).await {
+                        Ok(fees) => {
+                            executed_entries.push(Entry::new_call(call.clone()));
+                            executed_entry_fees.push(fees);
+                            if let Some(all_collected_bits) = collected_entry_ape_bits.as_mut() {
+                                all_collected_bits.push(collected_bits_text.clone());
+                            }
+                            let sighash = call
+                                .sighash()
+                                .map_err(BatchExecutionError::CallSighashError)?;
+                            executed_entry_sighashes.push(sighash);
+                            executed_entry_account_bls_keys.push(call.account.bls_key());
+                        }
+                        Err(error) => return Err(BatchExecutionError::CallExecutionError(error)),
+                    }
+                }
             }
         }
 
@@ -832,6 +850,18 @@ impl ExecCtx {
             .await
         {
             Ok(_) => Ok(Entry::new_deploy(deploy.clone())),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Executes a `Call` entry and returns it as an `Entry` (pool-facing wrapper).
+    pub async fn execute_call(
+        &mut self,
+        call: &Call,
+        execution_timestamp: u64,
+    ) -> Result<Entry, CallExecutionError> {
+        match self.execute_call_internal(call, execution_timestamp).await {
+            Ok(_) => Ok(Entry::new_call(call.clone())),
             Err(error) => Err(error),
         }
     }
