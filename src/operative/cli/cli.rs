@@ -1,4 +1,5 @@
 use crate::communicative::peer::peer::PEER;
+use crate::constructive::core_types::calldata::calldata_elements::calldata_element::CalldataElement;
 use crate::inscriptive::archival_manager::archival_manager::ARCHIVAL_MANAGER;
 use crate::inscriptive::coin_manager::coin_manager::COIN_MANAGER;
 use crate::inscriptive::flame_manager::flame_manager::FLAME_MANAGER;
@@ -605,6 +606,52 @@ pub async fn run_node_cli(
                 )
                 .await;
             }
+            "call" => {
+                let contract_id = match parts.get(1).map(String::as_str).and_then(parse_account_key)
+                {
+                    Some(id) => id,
+                    None => {
+                        eprintln!(
+                            "{}",
+                            "Usage: call <contract_id_hex> <method_index> [<type> <value> ...]"
+                                .yellow()
+                        );
+                        continue;
+                    }
+                };
+                let method_index: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(m) => m,
+                    None => {
+                        eprintln!(
+                            "{}",
+                            "Usage: call <contract_id_hex> <method_index> [<type> <value> ...]"
+                                .yellow()
+                        );
+                        continue;
+                    }
+                };
+                let calldata_elements = match parse_calldata_elements(&parts[3..]) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!(
+                            "{}",
+                            "Invalid calldata. Use type/value pairs, e.g. `payable 5000` or `u32 42`."
+                                .yellow()
+                        );
+                        continue;
+                    }
+                };
+                node_commands::call::call_command(
+                    contract_id,
+                    method_index,
+                    calldata_elements,
+                    key_holder,
+                    sync_manager,
+                    registery,
+                    engine_conn,
+                )
+                .await;
+            }
             _ => eprintln!("{}", format!("Unknown commmand.").yellow()),
         }
     }
@@ -692,6 +739,24 @@ fn parse_32_byte_hex(s: &str) -> Option<[u8; 32]> {
 
 fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
     hex::decode(s.trim_start_matches("0x")).ok()
+}
+
+/// Parses CLI calldata as `<type> <value>` pairs, e.g. `payable 5000 u32 42`.
+fn parse_calldata_elements(args: &[String]) -> Option<Vec<CalldataElement>> {
+    let mut out = Vec::<CalldataElement>::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let element_type = args.get(i)?.as_str().to_ascii_lowercase();
+        let value = args.get(i + 1)?;
+        let element = match element_type.as_str() {
+            "payable" => CalldataElement::Payable(value.parse::<u32>().ok()?),
+            "u32" => CalldataElement::U32(value.parse::<u32>().ok()?),
+            _ => return None,
+        };
+        out.push(element);
+        i += 2;
+    }
+    Some(out)
 }
 
 fn parse_config_fields(

@@ -1,4 +1,5 @@
 pub mod batchrecord;
+pub mod call;
 pub mod coins;
 pub mod comp;
 pub mod conn;

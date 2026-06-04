@@ -10,3 +10,4 @@ pub mod ping;
 pub mod config;
 pub mod swapout;
 pub mod deploy;
+pub mod call;
