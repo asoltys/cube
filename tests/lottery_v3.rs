@@ -51,9 +51,9 @@ mod lottery_v3 {
     const KEY_D: u8 = 0x64; // "d"
     const KEY_W: u8 = 0x77; // "w"
     const KEY_LW: u8 = 0x4c; // "L" timestamp of the last win (for the daily guarantee)
-    const DURATION: u8 = 120; // 2-minute rounds
+    const DURATION: u8 = 120; // 2-minute rounds (timer starts at the first entry)
     const DAY: u64 = 86_400; // guaranteed winner if no win for this long
-    const ODDS_DENOM: u8 = 99; // house = rt * 99 -> win region rt is 1/100 of space (1%)
+    const ODDS_DENOM: u64 = 475; // house = rt * 475 -> win region rt is 1/476 of space (~0.21%)
 
     // Operator account that accrues the 1% rake (baked into the contract).
     const OPERATOR_HEX: &str = "a55068222783355b755993fe7e1ac0b190d29fa2689a9ebc041ff7252617dd04";
@@ -86,6 +86,15 @@ mod lottery_v3 {
     // the contributor, all indexed by the monotonic global entry number.
     fn enter_script() -> Vec<Opcode> {
         vec![
+            // First entry of the round starts the 2-minute timer: if g == rs
+            // (no entries yet this round) then t = now. This way a lone early
+            // joiner gives others a full window instead of an already-elapsed one.
+            k(KEY_G), sread(), k(KEY_RS), sread(),
+            Opcode::OP_EQUAL(OP_EQUAL),
+            Opcode::OP_IF(OP_IF),
+            Opcode::OP_TIMESTAMP(OP_TIMESTAMP), k(KEY_TIME), swrite(),
+            Opcode::OP_ENDIF(OP_ENDIF),
+            // newT = T + E
             k(KEY_TOTAL), sread(),
             Opcode::OP_ADD(OP_ADD), Opcode::OP_VERIFY(OP_VERIFY),
             Opcode::OP_DUP(OP_DUP),
@@ -177,7 +186,7 @@ mod lottery_v3 {
         e(&mut s, Opcode::OP_IF(OP_IF));
         e(&mut s, Opcode::OP_DROP(OP_DROP)); e(&mut s, Opcode::OP_FALSE(OP_FALSE)); // [rt, 0]
         e(&mut s, Opcode::OP_ELSE(OP_ELSE));
-        s.push(push(vec![ODDS_DENOM])); e(&mut s, Opcode::OP_MUL(OP_MUL)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt, rt*99]
+        s.push(push(le_bytes(ODDS_DENOM))); e(&mut s, Opcode::OP_MUL(OP_MUL)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt, rt*475]
         e(&mut s, Opcode::OP_ENDIF(OP_ENDIF)); // [rt, house]
         e(&mut s, Opcode::OP_ADD(OP_ADD)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [space]
         s.push(k(KEY_SEED)); s.push(sread());
@@ -382,6 +391,26 @@ mod lottery_v3 {
         println!("1% regime rollover: operator gained={} treasury={}", op_gain, treasury);
         assert_eq!(op_gain, 0, "no rake on rollover");
         assert_eq!(treasury, 15000, "round-2 pot rolls over into the jackpot");
+    }
+
+    #[tokio::test]
+    async fn timer_starts_at_first_entry_not_round_open() {
+        let (reg, cm, sm, cid, players, _op, ts) = setup().await;
+        let amounts: [u64; 5] = [1000, 2000, 3000, 4000, 5000];
+        let mut win = [0u8; 32]; win[0] = 0x88; win[1] = 0x13;
+        let settle1 = round(&reg, &cm, &sm, cid, &players, &amounts, ts, win, 2).await;
+        // Round 2 opened at advance(settle1) with t=settle1, but nobody joins for
+        // a long while. The first joiner should reset the 2-minute timer to now.
+        let join = settle1 + 5000;
+        enter(&reg, &cm, &sm, cid, players[0], 1000, join).await;
+        let t = le_uint(&sm.lock().await.get_state_value(cid, &vec![KEY_TIME]).unwrap_or_default());
+        assert_eq!(t, join, "timer resets to the first entry's timestamp");
+        // Closing before join + DURATION must fail (window not elapsed yet).
+        let early = execute(false, Caller::Account(players[0]), cid, 1, vec![], join + 60, win, 1_000_000, 0, 0, 0, &sm, &cm, &reg).await;
+        assert!(early.is_err(), "cannot close until 2 minutes after the first entry");
+        // Closing after the window succeeds.
+        execute(false, Caller::Account(players[0]), cid, 1, vec![], join + DURATION as u64 + 1, win, 1_000_000, 0, 0, 0, &sm, &cm, &reg)
+            .await.unwrap_or_else(|e| panic!("close after window failed: {:?}", e));
     }
 
     #[tokio::test]
