@@ -28,12 +28,16 @@ pub async fn call_command(
     // 1 Build the caller's root account from the registery.
     let root_account = RootAccount::self_root_account_from_registery(key_holder, registery).await;
 
-    // 2 Resolve the contract's registery index (rank).
-    let registery_index = {
+    // 2 Build the contract with its registery index from the registery body.
+    // (Must use the body's registery_index, not the frequency rank — the sighash
+    // signs over registery_index, and the engine's APE decode reconstructs it from
+    // the body, so they must agree.)
+    let contract = {
         let _registery = registery.lock().await;
-        _registery.get_rank_by_contract_id(contract_id).unwrap_or(0)
+        _registery
+            .get_contract_by_contract_id(contract_id)
+            .unwrap_or_else(|| Contract::new(contract_id, 0))
     };
-    let contract = Contract::new(contract_id, registery_index);
 
     // 3 Target the next execution batch height.
     let batch_height_tip: u64 = {
@@ -49,7 +53,9 @@ pub async fn call_command(
         MethodIndex::new(method_index),
         calldata_elements,
         OpsBudget::new(None),
-        OpsPrice::new(0),
+        // ops price must equal the network base ops price (exec_ctx base_ops_price = 100);
+        // the APE encoder requires >= base and the executor requires == base.
+        OpsPrice::new(100),
         target,
     );
 
