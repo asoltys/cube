@@ -356,7 +356,7 @@ pub async fn run(
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(8090);
                 let contract_hex = std::env::var("CUBE_LOTTERY_CONTRACT").unwrap_or_else(|_| {
-                    "308fe2da8b9cae79e8b9316c889f3ea5fe6f61aaa65e396d9e5692f06afb8a57".to_string()
+                    "fd2d844bc946f44e9196f3e929eb256a6a7936b5252c56191dbdb7e04edfbca3".to_string()
                 });
                 let mine_address = std::env::var("CUBE_MINE_ADDRESS")
                     .unwrap_or_else(|_| "bcrt1q6eveccs27r8ckn76chzwz0ajhe2qje5yp8ks8t".to_string());

@@ -1,8 +1,10 @@
-// Cube Lottery arcade: a small web server (served on localhost) that lets people
-// play the on-VM lottery from a browser. Keys are generated and calls are
-// BLS-signed entirely in the browser; this server only verifies the signature,
-// executes the call directly on the engine's VM (instant, no batch wait), and
-// runs a faucet so each browser tab can be a funded player.
+// Cube Lottery arcade (v2): a localhost web server to play the on-VM jackpot
+// lottery from a browser. Players generate keys and BLS-sign their `enter`
+// calls entirely client-side; this server verifies the signature and executes
+// the call directly on the VM. A background task drives the round lifecycle
+// (close + settle) using a server-held "settler" account; settle is
+// permissionless and the contract verifies the winner, so the server can't rig
+// the outcome.
 
 use crate::constructive::core_types::calldata::calldata_elements::calldata_element::CalldataElement;
 use crate::constructive::entity::account::root_account::registered_and_configured_root_account::registered_and_configured_root_account::RegisteredAndConfiguredRootAccount;
@@ -14,6 +16,8 @@ use crate::constructive::core_types::ops_price::ops_price::OpsPrice;
 use crate::constructive::core_types::target::target::Target;
 use crate::constructive::entry::entry_kinds::call::call::Call;
 use crate::executive::exec_ctx::exec_ctx::{ExecCtx, EXEC_CTX};
+use crate::executive::stack::stack_item::StackItem;
+use crate::executive::stack::stack_uint::{SafeConverter, StackItemUintExt, StackUint};
 use crate::inscriptive::archival_manager::archival_manager::ARCHIVAL_MANAGER;
 use crate::inscriptive::coin_manager::coin_manager::COIN_MANAGER;
 use crate::inscriptive::flame_manager::flame_manager::FLAME_MANAGER;
@@ -25,6 +29,8 @@ use crate::inscriptive::state_manager::state_manager::STATE_MANAGER;
 use crate::inscriptive::sync_manager::sync_manager::SYNC_MANAGER;
 use crate::inscriptive::utxo_set::utxo_set::UTXO_SET;
 use crate::operative::run_args::chain::Chain;
+use crate::transmutative::hash::sha256;
+use crate::transmutative::key::KeyHolder;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{Html, IntoResponse};
@@ -43,16 +49,22 @@ use std::sync::Arc;
 const INDEX_HTML: &str = include_str!("arcade_assets/index.html");
 const BUNDLE_JS: &str = include_str!("arcade_assets/bundle.js");
 
-// Lottery contract constants (mirror tests/lottery.rs).
-const KEY_N: u8 = 0x6e;
-const KEY_S: u8 = 0x73;
-const KEY_A: u8 = 0x61;
-const KEY_R: u8 = 0x72;
-const ROUND: u64 = 3;
-const ENTRY_COST: u64 = 10_000;
-const PAYOUT: u64 = 27_000;
-const FAUCET_TOPUP_TO: u64 = 100_000;
-const FAUCET_TOPUP_BELOW: u64 = 30_000;
+// Lottery v2 state keys (mirror tests/lottery_v2.rs).
+const KEY_TOTAL: u8 = 0x54; // running total ever
+const KEY_B: u8 = 0x42; // cum-before-current-round
+const KEY_G: u8 = 0x67; // global entry count
+const KEY_RS: u8 = 0x72; // round start global index
+const KEY_C: u8 = 0x63; // "c"+le(i) cumulative sum after entry i
+const KEY_P: u8 = 0x70; // "p"+le(i) participant at entry i
+const KEY_TIME: u8 = 0x74; // round open time
+const KEY_K: u8 = 0x6b; // closed-at round number
+const KEY_SEED: u8 = 0x73; // seed
+const KEY_D: u8 = 0x64; // completed rounds
+const KEY_W: u8 = 0x77; // last-win round number
+
+const ROUND_DURATION: u64 = 60; // seconds (must match the contract)
+const MIN_PARTICIPANTS: u64 = 5;
+const FAUCET_GRANT: u64 = 10_000;
 
 #[derive(Clone)]
 struct ArcadeState {
@@ -72,7 +84,11 @@ struct ArcadeState {
     rpc_user: String,
     rpc_pass: String,
     mine_address: String,
+    settler_account: [u8; 32],
+    settler_bls: [u8; 48],
+    settler_reg_index: u64,
     last_winner: Arc<tokio::sync::Mutex<Option<String>>>,
+    exec_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ArcadeState {
@@ -92,11 +108,7 @@ impl ArcadeState {
         )
     }
     fn rpc(&self) -> Option<Client> {
-        Client::new(
-            &self.rpc_url,
-            Auth::UserPass(self.rpc_user.clone(), self.rpc_pass.clone()),
-        )
-        .ok()
+        Client::new(&self.rpc_url, Auth::UserPass(self.rpc_user.clone(), self.rpc_pass.clone())).ok()
     }
     fn best_block_hash(&self) -> [u8; 32] {
         self.rpc()
@@ -106,21 +118,43 @@ impl ArcadeState {
     }
     fn mine(&self, n: u64) {
         if let (Some(rpc), Ok(addr)) = (self.rpc(), bitcoin::Address::from_str(&self.mine_address)) {
-            let addr = addr.assume_checked();
-            let _ = rpc.generate_to_address(n, &addr);
+            let _ = rpc.generate_to_address(n, &addr.assume_checked());
         }
+    }
+    async fn read_uint(&self, key: &[u8]) -> u64 {
+        let sm = self.state_manager.lock().await;
+        sm.get_state_value(self.contract_id, &key.to_vec())
+            .map(|v| le_uint(&v))
+            .unwrap_or(0)
+    }
+    async fn read_cum(&self, i: u64) -> u64 {
+        let mut key = vec![KEY_C];
+        key.extend(minimal_le(i));
+        let sm = self.state_manager.lock().await;
+        sm.get_state_value(self.contract_id, &key).map(|v| le_uint(&v)).unwrap_or(0)
+    }
+    async fn read_participant(&self, i: u64) -> Option<Vec<u8>> {
+        let mut key = vec![KEY_P];
+        key.extend(minimal_le(i));
+        let sm = self.state_manager.lock().await;
+        sm.get_state_value(self.contract_id, &key)
+    }
+    async fn contract_registery_index(&self) -> u64 {
+        let reg = self.registery.lock().await;
+        reg.get_contract_by_contract_id(self.contract_id).map(|c| c.registery_index).unwrap_or(0)
+    }
+    fn settler_call(&self, contract: Contract, method_index: u16, calldata: Vec<CalldataElement>, target: u64) -> Call {
+        let account = RootAccount::RegisteredAndConfiguredRootAccount(
+            RegisteredAndConfiguredRootAccount::new(self.settler_account, self.settler_reg_index, self.settler_bls),
+        );
+        Call::new(account, contract, MethodIndex::new(method_index), calldata, OpsBudget::new(None), OpsPrice::new(100), Target::new(target))
     }
 }
 
-// ---------- helpers ----------
-fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    let v = hex::decode(s.trim_start_matches("0x")).ok()?;
-    v.try_into().ok()
-}
-fn le_uint(bytes: &[u8]) -> u64 {
+fn le_uint(b: &[u8]) -> u64 {
     let mut x = 0u64;
-    for (i, &b) in bytes.iter().take(8).enumerate() {
-        x |= (b as u64) << (8 * i);
+    for (i, &c) in b.iter().take(8).enumerate() {
+        x |= (c as u64) << (8 * i);
     }
     x
 }
@@ -132,16 +166,10 @@ fn minimal_le(mut n: u64) -> Vec<u8> {
     }
     out
 }
-
-async fn read_state_uint(s: &ArcadeState, key: u8) -> u64 {
-    let sm = s.state_manager.lock().await;
-    sm.get_state_value(s.contract_id, &vec![key])
-        .map(|v| le_uint(&v))
-        .unwrap_or(0)
+fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    hex::decode(s.trim_start_matches("0x")).ok()?.try_into().ok()
 }
 
-// ---------- handlers ----------
-// Serve embedded assets, or live from CUBE_ARCADE_ASSETS dir if set (for UI iteration).
 fn asset(name: &str, embedded: &'static str) -> String {
     if let Ok(dir) = std::env::var("CUBE_ARCADE_ASSETS") {
         if let Ok(s) = std::fs::read_to_string(format!("{}/{}", dir, name)) {
@@ -154,45 +182,89 @@ async fn serve_index() -> Html<String> {
     Html(asset("index.html", INDEX_HTML))
 }
 async fn serve_bundle() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        asset("bundle.js", BUNDLE_JS),
-    )
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], asset("bundle.js", BUNDLE_JS))
 }
 
-async fn contract_registery_index(s: &ArcadeState) -> u64 {
-    let reg = s.registery.lock().await;
-    reg.get_contract_by_contract_id(s.contract_id)
-        .map(|c| c.registery_index)
-        .unwrap_or(0)
+// Commit the execution delta to permanent storage.
+async fn commit(s: &ArcadeState) {
+    let _ = s.coin_manager.lock().await.apply_changes();
+    let _ = s.state_manager.lock().await.apply_changes();
+    let _ = s.registery.lock().await.apply_changes();
+    let _ = s.graveyard.lock().await.apply_changes();
+    let _ = s.privileges_manager.lock().await.apply_changes();
 }
 
-async fn get_state(
-    State(s): State<ArcadeState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Json<Value> {
-    let n = read_state_uint(&s, KEY_N).await;
-    let armed = read_state_uint(&s, KEY_A).await;
-    let treasury = {
-        let cm = s.coin_manager.lock().await;
-        cm.get_contract_balance(s.contract_id).unwrap_or(0)
+// Execute a single call directly on the VM (serialized via exec_lock).
+async fn run_call(s: &ArcadeState, call: &Call) -> Result<(), String> {
+    let _guard = s.exec_lock.lock().await;
+    let block_hash = s.best_block_hash();
+    let now = Utc::now().timestamp() as u64;
+    let ctx = s.exec_ctx();
+    {
+        ctx.lock().await.pre_execution().await;
+    }
+    let res = {
+        ctx.lock().await.execute_call(call, now, block_hash).await
     };
-    let batch_height_tip = {
-        let sm = s.sync_manager.lock().await;
-        sm.cube_batch_sync_height_tip()
+    drop(ctx);
+    match res {
+        Ok(_) => {
+            commit(s).await;
+            Ok(())
+        }
+        Err(e) => {
+            s.exec_ctx().lock().await.flush().await;
+            Err(format!("{:?}", e))
+        }
+    }
+}
+
+async fn round_view(s: &ArcadeState) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, Vec<u8>) {
+    // returns (g, rs, t, k, d, w, total, b, count, seed)
+    let g = s.read_uint(&[KEY_G]).await;
+    let rs = s.read_uint(&[KEY_RS]).await;
+    let t = s.read_uint(&[KEY_TIME]).await;
+    let k = s.read_uint(&[KEY_K]).await;
+    let d = s.read_uint(&[KEY_D]).await;
+    let w = s.read_uint(&[KEY_W]).await;
+    let total = s.read_uint(&[KEY_TOTAL]).await;
+    let b = s.read_uint(&[KEY_B]).await;
+    let seed = {
+        let sm = s.state_manager.lock().await;
+        sm.get_state_value(s.contract_id, &vec![KEY_SEED]).unwrap_or_default()
     };
+    (g, rs, t, k, d, w, total, b, g - rs, seed)
+}
+
+async fn get_state(State(s): State<ArcadeState>, Query(params): Query<HashMap<String, String>>) -> Json<Value> {
+    let (g, rs, t, k, d, w, total, b, count, _seed) = round_view(&s).await;
+    let round_total = total.saturating_sub(b);
+    let treasury = { s.coin_manager.lock().await.get_contract_balance(s.contract_id).unwrap_or(0) };
+    let now = Utc::now().timestamp() as u64;
+    let closed = k == d + 1;
+    let streak = d.saturating_sub(w);
+    let final_round = streak >= 3;
+    let time_left = if count == 0 { ROUND_DURATION } else { (t + ROUND_DURATION).saturating_sub(now) };
+    let tip = { s.sync_manager.lock().await.cube_batch_sync_height_tip() };
+    let contract_ri = s.contract_registery_index().await;
+
     let mut out = json!({
         "contract_id": hex::encode(s.contract_id),
-        "contract_registery_index": contract_registery_index(&s).await,
-        "batch_height_tip": batch_height_tip,
-        "n": n,
-        "treasury": treasury,
-        "armed": armed,
-        "round_size": ROUND,
-        "entry_cost": ENTRY_COST,
-        "payout": PAYOUT,
+        "contract_registery_index": contract_ri,
+        "batch_height_tip": tip,
+        "jackpot": treasury,
+        "round_pot": round_total,
+        "participants": count,
+        "min_participants": MIN_PARTICIPANTS,
+        "round_duration": ROUND_DURATION,
+        "time_left": time_left,
+        "closed": closed,
+        "rollover_streak": streak,
+        "final_round": final_round,
         "last_winner": s.last_winner.lock().await.clone(),
+        "entry_cost_hint": FAUCET_GRANT,
     });
+
     if let Some(acct_hex) = params.get("account") {
         if let Some(account_key) = parse_hex::<32>(acct_hex) {
             let (registered, reg_index) = {
@@ -202,11 +274,21 @@ async fn get_state(
                     None => (false, 0),
                 }
             };
-            let balance = {
-                let cm = s.coin_manager.lock().await;
-                cm.get_account_balance(account_key).unwrap_or(0)
-            };
-            out["account"] = json!({ "registered": registered, "registery_index": reg_index, "balance": balance });
+            let balance = { s.coin_manager.lock().await.get_account_balance(account_key).unwrap_or(0) };
+            // Your contribution this round = sum over [rs, g) where participant == you.
+            let mut your = 0u64;
+            for i in rs..g {
+                if s.read_participant(i).await.as_deref() == Some(&account_key[..]) {
+                    let cur = s.read_cum(i).await;
+                    let prev = if i == 0 { 0 } else { s.read_cum(i - 1).await };
+                    your += cur - prev;
+                }
+            }
+            out["account"] = json!({
+                "registered": registered, "registery_index": reg_index, "balance": balance,
+                "your_contribution": your,
+                "odds_pct": if round_total > 0 { (your as f64) * 100.0 / (round_total as f64) } else { 0.0 },
+            });
         }
     }
     Json(out)
@@ -217,51 +299,36 @@ struct FaucetReq {
     account_key: String,
     bls_key: String,
 }
-
 async fn post_faucet(State(s): State<ArcadeState>, Json(body): Json<FaucetReq>) -> Json<Value> {
     let (account_key, bls_key) = match (parse_hex::<32>(&body.account_key), parse_hex::<48>(&body.bls_key)) {
         (Some(a), Some(b)) => (a, b),
         _ => return Json(json!({ "error": "bad keys" })),
     };
     let now = Utc::now().timestamp() as u64;
-
-    // Register the account (configured with its BLS key) if not already.
-    let already = {
-        let reg = s.registery.lock().await;
-        reg.get_account_info_by_account_key(account_key).is_some()
-    };
+    let _guard = s.exec_lock.lock().await;
+    let already = { s.registery.lock().await.get_account_info_by_account_key(account_key).is_some() };
     if !already {
         let mut reg = s.registery.lock().await;
         let _ = reg.register_account(account_key, now, Some(bls_key), None, None, None);
         let _ = reg.apply_changes();
     }
-
-    // Grant / top up balance.
     {
         let mut cm = s.coin_manager.lock().await;
         match cm.get_account_balance(account_key) {
             None => {
-                let _ = cm.register_account(account_key, FAUCET_TOPUP_TO);
+                let _ = cm.register_account(account_key, FAUCET_GRANT);
             }
-            Some(bal) if bal < FAUCET_TOPUP_BELOW => {
-                let _ = cm.account_balance_up(account_key, FAUCET_TOPUP_TO - bal);
+            Some(_) => {
+                let _ = cm.account_balance_up(account_key, FAUCET_GRANT);
             }
-            Some(_) => {}
         }
         let _ = cm.apply_changes();
     }
-
     let reg_index = {
-        let reg = s.registery.lock().await;
-        reg.get_account_info_by_account_key(account_key)
-            .map(|(_, _, idx, _)| idx)
-            .unwrap_or(0)
+        s.registery.lock().await.get_account_info_by_account_key(account_key).map(|(_, _, idx, _)| idx).unwrap_or(0)
     };
-    let balance = {
-        let cm = s.coin_manager.lock().await;
-        cm.get_account_balance(account_key).unwrap_or(0)
-    };
-    Json(json!({ "registery_index": reg_index, "balance": balance }))
+    let balance = { s.coin_manager.lock().await.get_account_balance(account_key).unwrap_or(0) };
+    Json(json!({ "registery_index": reg_index, "balance": balance, "granted": FAUCET_GRANT }))
 }
 
 #[derive(Deserialize)]
@@ -281,137 +348,93 @@ struct CallReq {
     target: u64,
     bls_signature: String,
 }
-
 async fn post_call(State(s): State<ArcadeState>, Json(body): Json<CallReq>) -> Json<Value> {
-    let account_key = match parse_hex::<32>(&body.account_key) {
-        Some(a) => a,
-        None => return Json(json!({ "ok": false, "error": "bad account key" })),
-    };
-    let bls_key = match parse_hex::<48>(&body.bls_key) {
-        Some(b) => b,
-        None => return Json(json!({ "ok": false, "error": "bad bls key" })),
-    };
-    let signature = match parse_hex::<96>(&body.bls_signature) {
-        Some(sig) => sig,
-        None => return Json(json!({ "ok": false, "error": "bad signature" })),
-    };
+    let account_key = match parse_hex::<32>(&body.account_key) { Some(a) => a, None => return Json(json!({"ok":false,"error":"bad account key"})) };
+    let bls_key = match parse_hex::<48>(&body.bls_key) { Some(b) => b, None => return Json(json!({"ok":false,"error":"bad bls key"})) };
+    let signature = match parse_hex::<96>(&body.bls_signature) { Some(x) => x, None => return Json(json!({"ok":false,"error":"bad signature"})) };
 
-    // Reconstruct the Call exactly as the browser signed it.
     let account = RootAccount::RegisteredAndConfiguredRootAccount(
         RegisteredAndConfiguredRootAccount::new(account_key, body.registery_index, bls_key),
     );
-    let contract = {
-        let reg = s.registery.lock().await;
-        reg.get_contract_by_contract_id(s.contract_id)
-            .unwrap_or_else(|| Contract::new(s.contract_id, 0))
-    };
-    let calldata: Vec<CalldataElement> = body
-        .calldata
-        .iter()
-        .filter(|e| e.kind == "payable")
-        .map(|e| CalldataElement::Payable(e.value as u32))
-        .collect();
-    let call = Call::new(
-        account,
-        contract,
-        MethodIndex::new(body.method_index),
-        calldata,
-        OpsBudget::new(None),
-        OpsPrice::new(body.ops_price),
-        Target::new(body.target),
-    );
+    let contract = { s.registery.lock().await.get_contract_by_contract_id(s.contract_id).unwrap_or_else(|| Contract::new(s.contract_id, 0)) };
+    let calldata: Vec<CalldataElement> = body.calldata.iter().filter(|e| e.kind == "payable").map(|e| CalldataElement::Payable(e.value as u32)).collect();
+    let call = Call::new(account, contract, MethodIndex::new(body.method_index), calldata, OpsBudget::new(None), OpsPrice::new(body.ops_price), Target::new(body.target));
 
-    // Verify the browser's BLS signature over the sighash.
     if call.bls_verify(signature).is_err() {
         return Json(json!({ "ok": false, "error": "signature verification failed" }));
     }
-
-    let balance_before = {
-        let cm = s.coin_manager.lock().await;
-        cm.get_account_balance(account_key).unwrap_or(0)
-    };
-
-    // Execute directly on the VM. OP_BLOCKHASH = current Bitcoin tip hash.
-    let block_hash = s.best_block_hash();
-    let now = Utc::now().timestamp() as u64;
-    let exec_ctx = s.exec_ctx();
-    {
-        let mut ctx = exec_ctx.lock().await;
-        ctx.pre_execution().await;
-    }
-    let result = {
-        let mut ctx = exec_ctx.lock().await;
-        ctx.execute_call(&call, now, block_hash).await
-    };
-    drop(exec_ctx);
-
-    match result {
-        Err(e) => {
-            // Discard the partial delta on failure.
-            s.exec_ctx().lock().await.flush().await;
-            Json(json!({ "ok": false, "error": format!("{:?}", e) }))
-        }
+    match run_call(&s, &call).await {
         Ok(_) => {
-            // Commit the execution delta to permanent storage.
-            let _ = s.coin_manager.lock().await.apply_changes();
-            let _ = s.state_manager.lock().await.apply_changes();
-            let _ = s.registery.lock().await.apply_changes();
-            let _ = s.graveyard.lock().await.apply_changes();
-            let _ = s.privileges_manager.lock().await.apply_changes();
-            // Advance the chain tip so a subsequent draw uses a *different* block hash.
-            s.mine(1);
+            s.mine(1); // advance the tip so the round seed evolves
+            let balance = { s.coin_manager.lock().await.get_account_balance(account_key).unwrap_or(0) };
+            Json(json!({ "ok": true, "balance": balance }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
 
-            let balance_after = {
-                let cm = s.coin_manager.lock().await;
-                cm.get_account_balance(account_key).unwrap_or(0)
-            };
-            let treasury = {
-                let cm = s.coin_manager.lock().await;
-                cm.get_contract_balance(s.contract_id).unwrap_or(0)
-            };
-
-            // If this was a draw (method 1), compute + record the winner for display.
-            let mut winner_hex: Option<String> = None;
-            if body.method_index == 1 {
-                let r_stored = read_state_uint(&s, KEY_R).await;
-                let round_start = r_stored.saturating_sub(1);
-                let modv: u64 = block_hash.iter().map(|&b| b as u64).sum::<u64>() % ROUND;
-                let widx = round_start + modv;
-                let mut slot_key = vec![KEY_S];
-                slot_key.extend(minimal_le(widx));
-                let w = {
-                    let sm = s.state_manager.lock().await;
-                    sm.get_state_value(s.contract_id, &slot_key)
-                };
-                if let Some(w) = w {
-                    let wh = hex::encode(&w);
-                    winner_hex = Some(wh.clone());
-                    *s.last_winner.lock().await = Some(wh);
+// The round-lifecycle loop: close + settle when a round is ripe.
+async fn lifecycle(s: ArcadeState) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let (g, rs, t, k, d, w, total, b, count, _seed) = round_view(&s).await;
+        let now = Utc::now().timestamp() as u64;
+        let closed = k == d + 1;
+        if closed || count < MIN_PARTICIPANTS || now < t + ROUND_DURATION {
+            continue;
+        }
+        // 1) close (snapshots the seed from the current block hash)
+        let target = { s.sync_manager.lock().await.cube_batch_sync_height_tip() } + 1;
+        let contract = { s.registery.lock().await.get_contract_by_contract_id(s.contract_id).unwrap_or_else(|| Contract::new(s.contract_id, 0)) };
+        let close_call = s.settler_call(contract.clone(), 1, vec![], target);
+        if let Err(e) = run_call(&s, &close_call).await {
+            eprintln!("arcade: close failed: {}", e);
+            continue;
+        }
+        // 2) compute winner / rollover from the stored seed
+        let (_g2, _rs2, _t2, _k2, _d2, _w2, total2, b2, _c2, seed) = round_view(&s).await;
+        let round_total = total2.saturating_sub(b2);
+        let streak = d.saturating_sub(w);
+        let house = if streak >= 3 { 0 } else { round_total / 3 };
+        let space = (round_total + house).max(1);
+        let seed_su = StackItem::new(seed).to_stack_uint().unwrap_or_else(|| StackUint::from(0u64));
+        let r = (seed_su % StackUint::from(space)).to_u64().unwrap_or(0);
+        let rg = r + b2;
+        let rollover = rg >= total2;
+        let idx = if rollover {
+            0u64
+        } else {
+            // find idx in [rs, g) with cum[idx-1] <= rg < cum[idx]
+            let mut found = rs;
+            for i in rs..g {
+                let upper = s.read_cum(i).await;
+                let lower = if i == 0 { 0 } else { s.read_cum(i - 1).await };
+                if lower <= rg && rg < upper {
+                    found = i;
+                    break;
                 }
             }
-
-            Json(json!({
-                "ok": true,
-                "balance": balance_after,
-                "won": balance_after > balance_before,
-                "payout": PAYOUT,
-                "treasury": treasury,
-                "winner": winner_hex,
-            }))
+            found
+        };
+        let winner_key = if rollover { None } else { s.read_participant(idx).await.map(hex::encode) };
+        // 3) settle
+        let settle_call = s.settler_call(contract, 2, vec![CalldataElement::U32(idx as u32)], target);
+        match run_call(&s, &settle_call).await {
+            Ok(_) => {
+                s.mine(1);
+                if rollover {
+                    println!("arcade: round {} rolled over (jackpot grows)", d + 1);
+                } else if let Some(wk) = winner_key.clone() {
+                    println!("arcade: round {} winner {}", d + 1, &wk[..wk.len().min(12)]);
+                    *s.last_winner.lock().await = winner_key;
+                }
+            }
+            Err(e) => eprintln!("arcade: settle failed: {}", e),
         }
     }
 }
 
-#[derive(Deserialize)]
-struct MineReq {
-    n: Option<u64>,
-}
-async fn post_mine(State(s): State<ArcadeState>, Json(body): Json<MineReq>) -> Json<Value> {
-    s.mine(body.n.unwrap_or(1));
-    Json(json!({ "ok": true, "tip": hex::encode(s.best_block_hash()) }))
-}
-
-/// Spawns the arcade web server as a background task.
+/// Spawns the arcade web server + round-lifecycle task.
 pub async fn run_arcade(
     _chain: Chain,
     port: u16,
@@ -432,6 +455,38 @@ pub async fn run_arcade(
     rpc_pass: String,
     mine_address: String,
 ) {
+    // Derive + register the server "settler" account (drives close/settle).
+    let settler_secret = sha256(b"cube-arcade-settler-v2");
+    let kh = match KeyHolder::new(settler_secret) {
+        Some(kh) => kh,
+        None => {
+            eprintln!("arcade: failed to build settler keyholder");
+            return;
+        }
+    };
+    let settler_account = kh.secp_public_key_bytes();
+    let settler_bls = kh.bls_public_key_bytes();
+    {
+        let now = Utc::now().timestamp() as u64;
+        let already = { registery.lock().await.get_account_info_by_account_key(settler_account).is_some() };
+        if !already {
+            let mut reg = registery.lock().await;
+            let _ = reg.register_account(settler_account, now, Some(settler_bls), None, None, None);
+            let _ = reg.apply_changes();
+        }
+        let mut cm = coin_manager.lock().await;
+        if cm.get_account_balance(settler_account).is_none() {
+            let _ = cm.register_account(settler_account, 10_000_000);
+        }
+        let _ = cm.apply_changes();
+    }
+    let settler_reg_index = registery
+        .lock()
+        .await
+        .get_account_info_by_account_key(settler_account)
+        .map(|(_, _, idx, _)| idx)
+        .unwrap_or(0);
+
     let state = ArcadeState {
         engine_key,
         contract_id,
@@ -449,8 +504,14 @@ pub async fn run_arcade(
         rpc_user,
         rpc_pass,
         mine_address,
+        settler_account,
+        settler_bls,
+        settler_reg_index,
         last_winner: Arc::new(tokio::sync::Mutex::new(None)),
+        exec_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+
+    tokio::spawn(lifecycle(state.clone()));
 
     let app = Router::new()
         .route("/", get(serve_index))
@@ -458,7 +519,6 @@ pub async fn run_arcade(
         .route("/api/state", get(get_state))
         .route("/api/faucet", post(post_faucet))
         .route("/api/call", post(post_call))
-        .route("/api/mine", post(post_mine))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
