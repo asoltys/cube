@@ -11,6 +11,9 @@ use serde_json::{Map, Value};
 
 // A type alias for bytes.
 type Bytes = Vec<u8>;
+type TapLeafHash = [u8; 32];
+type TapScript = Vec<u8>;
+type ControlBlock = Vec<u8>;
 
 /// MuSig2-based and thus interactive, but trustless Lift implementation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -118,6 +121,34 @@ impl LiftV2 {
 
         // 9 Return the lift JSON object
         Value::Object(obj)
+    }
+
+    /// Returns (tapleaf_hash, tapscript, control_block_bytes) for the account-only
+    /// CSV "sweep" leaf — the unilateral-exit path a depositor can spend with ONLY
+    /// the account key (no engine cooperation) once the relative timelock matures.
+    pub fn sweep_script_path_spend_elements(&self) -> (TapLeafHash, TapScript, ControlBlock) {
+        let taproot = self
+            .taproot()
+            .expect("LiftV2 must always have a TapRoot for P2TR script-path spends");
+
+        let tree = taproot
+            .tree()
+            .expect("TapRoot for LiftV2 must contain a TapTree");
+
+        let leaves = tree.leaves();
+        let tapleaf = leaves
+            .first()
+            .expect("TapTree for LiftV2 must contain the sweep TapLeaf");
+
+        let tapleaf_hash: TapLeafHash = tapleaf.tapleaf_hash();
+        let tapscript: TapScript = tapleaf.tap_script();
+
+        let control_block_bytes: ControlBlock = taproot
+            .control_block(0)
+            .expect("TapRoot for LiftV2 must produce a control block for leaf index 0")
+            .to_vec();
+
+        (tapleaf_hash, tapscript, control_block_bytes)
     }
 }
 
