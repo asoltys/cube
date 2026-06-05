@@ -35,7 +35,6 @@ mod lottery_v2 {
     use cube::executive::opcode::opcodes::arithmetic::op_not::OP_NOT;
     use cube::executive::opcode::opcodes::flow::op_returnall::OP_RETURNALL;
     use cube::executive::opcode::opcodes::flow::op_verify::OP_VERIFY;
-    use cube::executive::opcode::opcodes::push::op_5::OP_5;
     use cube::executive::opcode::opcodes::push::op_pushdata::OP_PUSHDATA;
     use cube::executive::opcode::opcodes::push::op_true::OP_TRUE;
     use cube::executive::opcode::opcodes::splice::op_cat::OP_CAT;
@@ -120,8 +119,8 @@ mod lottery_v2 {
             k(KEY_G), sread(),          // [rs, g]
             Opcode::OP_SUB(cube::executive::opcode::opcodes::arithmetic::op_sub::OP_SUB),
             Opcode::OP_VERIFY(OP_VERIFY), // [count]
-            Opcode::OP_5(OP_5),         // [count, 5]
-            Opcode::OP_GREATERTHANOREQUAL(OP_GREATERTHANOREQUAL), // [count>=5]
+            Opcode::OP_TRUE(OP_TRUE),    // [count, 1]  (require >= 1 participant)
+            Opcode::OP_GREATERTHANOREQUAL(OP_GREATERTHANOREQUAL), // [count>=1]
             Opcode::OP_VERIFY(OP_VERIFY), // []
             // require now >= t + DURATION
             Opcode::OP_TIMESTAMP(OP_TIMESTAMP), // [now]

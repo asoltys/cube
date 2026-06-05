@@ -63,7 +63,7 @@ const KEY_D: u8 = 0x64; // completed rounds
 const KEY_W: u8 = 0x77; // last-win round number
 
 const ROUND_DURATION: u64 = 60; // seconds (must match the contract)
-const MIN_PARTICIPANTS: u64 = 5;
+const MIN_PARTICIPANTS: u64 = 1; // contract requires >= 1 entrant
 const FAUCET_GRANT: u64 = 10_000;
 
 #[derive(Clone)]
@@ -88,6 +88,7 @@ struct ArcadeState {
     settler_bls: [u8; 48],
     settler_reg_index: u64,
     last_winner: Arc<tokio::sync::Mutex<Option<String>>>,
+    recent_draws: Arc<tokio::sync::Mutex<Vec<Value>>>,
     exec_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -262,6 +263,7 @@ async fn get_state(State(s): State<ArcadeState>, Query(params): Query<HashMap<St
         "rollover_streak": streak,
         "final_round": final_round,
         "last_winner": s.last_winner.lock().await.clone(),
+        "recent_draws": s.recent_draws.lock().await.clone(),
         "entry_cost_hint": FAUCET_GRANT,
     });
 
@@ -417,17 +419,25 @@ async fn lifecycle(s: ArcadeState) {
             found
         };
         let winner_key = if rollover { None } else { s.read_participant(idx).await.map(hex::encode) };
+        let pot = { s.coin_manager.lock().await.get_contract_balance(s.contract_id).unwrap_or(0) };
+        let round_no = d + 1;
         // 3) settle
         let settle_call = s.settler_call(contract, 2, vec![CalldataElement::U32(idx as u32)], target);
         match run_call(&s, &settle_call).await {
             Ok(_) => {
                 s.mine(1);
-                if rollover {
-                    println!("arcade: round {} rolled over (jackpot grows)", d + 1);
-                } else if let Some(wk) = winner_key.clone() {
-                    println!("arcade: round {} winner {}", d + 1, &wk[..wk.len().min(12)]);
-                    *s.last_winner.lock().await = winner_key;
-                }
+                let event = if rollover {
+                    println!("arcade: round {} rolled over (jackpot grows to {})", round_no, pot);
+                    json!({ "round": round_no, "kind": "rollover", "amount": pot, "ts": now })
+                } else {
+                    let wk = winner_key.clone().unwrap_or_default();
+                    println!("arcade: round {} winner {} wins {}", round_no, &wk[..wk.len().min(12)], pot);
+                    *s.last_winner.lock().await = winner_key.clone();
+                    json!({ "round": round_no, "kind": "win", "winner": wk, "amount": pot, "ts": now })
+                };
+                let mut feed = s.recent_draws.lock().await;
+                feed.insert(0, event);
+                feed.truncate(12);
             }
             Err(e) => eprintln!("arcade: settle failed: {}", e),
         }
@@ -508,6 +518,7 @@ pub async fn run_arcade(
         settler_bls,
         settler_reg_index,
         last_winner: Arc::new(tokio::sync::Mutex::new(None)),
+        recent_draws: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         exec_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
