@@ -349,42 +349,26 @@ pub async fn run(
             )
             .await;
 
-            // 11.a.8b Optional lottery arcade web UI (browser-signed play).
-            {
-                let arcade_port: u16 = std::env::var("CUBE_ARCADE_PORT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(8090);
-                let contract_hex = std::env::var("CUBE_LOTTERY_CONTRACT").unwrap_or_else(|_| {
-                    "35ea296b30d9e4f901ced2fe7119d1aa83e2f1615d313caf0d449d9869db865c".to_string()
+            // 11.a.8b Generic post-init hook: hand engine manager handles to any
+            // registered downstream service (see operative::runner::hook).
+            if let Some(hook) = crate::operative::runner::hook::engine_hook() {
+                hook(crate::operative::runner::hook::EngineHandles {
+                    chain,
+                    engine_key,
+                    registery: Arc::clone(&registery),
+                    coin_manager: Arc::clone(&coin_manager),
+                    state_manager: Arc::clone(&state_manager),
+                    flame_manager: Arc::clone(&flame_manager),
+                    sync_manager: Arc::clone(&sync_manager),
+                    utxo_set: Arc::clone(&utxo_set),
+                    params_manager: Arc::clone(&params_manager),
+                    privileges_manager: Arc::clone(&privileges_manager),
+                    graveyard: Arc::clone(&graveyard),
+                    archival_manager: archival_manager.clone(),
+                    rpc_url: rpc_holder.url(),
+                    rpc_user: rpc_holder.user(),
+                    rpc_pass: rpc_holder.password(),
                 });
-                let mine_address = std::env::var("CUBE_MINE_ADDRESS")
-                    .unwrap_or_else(|_| "bcrt1q6eveccs27r8ckn76chzwz0ajhe2qje5yp8ks8t".to_string());
-                if let Ok(bytes) = hex::decode(&contract_hex) {
-                    if let Ok(contract_id) = <[u8; 32]>::try_from(bytes) {
-                        crate::operative::cli::commands::common_commands::arcade::run_arcade(
-                            chain,
-                            arcade_port,
-                            engine_key,
-                            contract_id,
-                            &registery,
-                            &coin_manager,
-                            &state_manager,
-                            &flame_manager,
-                            &sync_manager,
-                            &utxo_set,
-                            &params_manager,
-                            &privileges_manager,
-                            &graveyard,
-                            archival_manager.as_ref(),
-                            rpc_holder.url(),
-                            rpc_holder.user(),
-                            rpc_holder.password(),
-                            mine_address,
-                        )
-                        .await;
-                    }
-                }
             }
 
             // 11.a.9 Run the Engine CLI.
