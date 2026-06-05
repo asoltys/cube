@@ -349,6 +349,44 @@ pub async fn run(
             )
             .await;
 
+            // 11.a.8b Optional lottery arcade web UI (browser-signed play).
+            {
+                let arcade_port: u16 = std::env::var("CUBE_ARCADE_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(8090);
+                let contract_hex = std::env::var("CUBE_LOTTERY_CONTRACT").unwrap_or_else(|_| {
+                    "308fe2da8b9cae79e8b9316c889f3ea5fe6f61aaa65e396d9e5692f06afb8a57".to_string()
+                });
+                let mine_address = std::env::var("CUBE_MINE_ADDRESS")
+                    .unwrap_or_else(|_| "bcrt1q6eveccs27r8ckn76chzwz0ajhe2qje5yp8ks8t".to_string());
+                if let Ok(bytes) = hex::decode(&contract_hex) {
+                    if let Ok(contract_id) = <[u8; 32]>::try_from(bytes) {
+                        crate::operative::cli::commands::common_commands::arcade::run_arcade(
+                            chain,
+                            arcade_port,
+                            engine_key,
+                            contract_id,
+                            &registery,
+                            &coin_manager,
+                            &state_manager,
+                            &flame_manager,
+                            &sync_manager,
+                            &utxo_set,
+                            &params_manager,
+                            &privileges_manager,
+                            &graveyard,
+                            archival_manager.as_ref(),
+                            rpc_holder.url(),
+                            rpc_holder.user(),
+                            rpc_holder.password(),
+                            mine_address,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             // 11.a.9 Run the Engine CLI.
             run_engine_cli(
                 &session_pool,

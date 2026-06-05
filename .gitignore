@@ -18,4 +18,7 @@ docker-compose.override.yml
 *.docker-compose.yml
 .docker/
 docker-data/
-docker-volumes/
+docker-volumes/arcade-ui/node_modules/
+arcade-ui/bundle.js
+arcade-ui/package-lock.json
+cube-run.log

@@ -1,3 +1,4 @@
+pub mod arcade;
 pub mod coinmanager;
 pub mod clear;
 pub mod engine;

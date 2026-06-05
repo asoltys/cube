@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cube Lottery</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: #0b0e14; color: #d7dce5; display: flex; justify-content: center; }
+  .wrap { width: 100%; max-width: 560px; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; color: #fff; letter-spacing: .5px; }
+  .sub { color: #6b7689; font-size: 12px; margin-bottom: 22px; }
+  .card { background: #141a24; border: 1px solid #222b39; border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+  .pot { text-align: center; }
+  .pot .amt { font-size: 44px; font-weight: 700; color: #ffd75e; }
+  .pot .lbl { color: #6b7689; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .stat { background: #0f141d; border: 1px solid #1d2531; border-radius: 8px; padding: 10px 12px; }
+  .stat .v { font-size: 20px; color: #fff; }
+  .stat .k { font-size: 11px; color: #6b7689; text-transform: uppercase; letter-spacing: .5px; }
+  .stat .v.on { color: #5ee08a; }
+  .row { display: flex; gap: 12px; margin-top: 4px; }
+  button { flex: 1; padding: 14px; font-size: 15px; font-weight: 600; border: 0; border-radius: 10px;
+           cursor: pointer; font-family: inherit; transition: filter .15s; }
+  button:hover:not(:disabled) { filter: brightness(1.12); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #enterbtn { background: #2f6df6; color: #fff; }
+  #drawbtn { background: #ffd75e; color: #1a1300; }
+  #newbtn { background: #222b39; color: #aab4c4; padding: 8px 14px; font-size: 12px; flex: 0 0 auto; }
+  .me { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #8a94a6; }
+  .me b { color: #d7dce5; }
+  #log { margin-top: 18px; font-size: 12px; max-height: 220px; overflow-y: auto; }
+  .logline { padding: 6px 10px; border-left: 2px solid #2b3545; margin-bottom: 4px; color: #9aa4b5; background: #0f141d; border-radius: 0 6px 6px 0; }
+  .logline.ok { border-color: #5ee08a; color: #bfe9cd; }
+  .logline.err { border-color: #f6614f; color: #f3b6ae; }
+  .foot { color: #4b5468; font-size: 11px; margin-top: 18px; line-height: 1.5; }
+  a { color: #2f6df6; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🎲 Cube Lottery</h1>
+    <div class="sub">provably-fair, drawn on a Bitcoin block hash · keys &amp; signatures generated in your browser</div>
+
+    <div class="card pot">
+      <div class="amt"><span id="pot">0</span></div>
+      <div class="lbl">sats in the pot</div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div class="stat"><div class="v"><span id="entries">0 / 3</span></div><div class="k">this round</div></div>
+        <div class="stat"><div class="v" id="armed">no</div><div class="k">draw armed</div></div>
+        <div class="stat"><div class="v"><span id="mybal">0</span></div><div class="k">your balance</div></div>
+        <div class="stat"><div class="v"><span id="total">0</span></div><div class="k">total entries</div></div>
+      </div>
+      <div class="row">
+        <button id="enterbtn">Enter · 10000</button>
+        <button id="drawbtn" disabled>Draw</button>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:#6b7689">last winner: <span id="winner">—</span></div>
+    </div>
+
+    <div class="card me">
+      <div>you are <b id="me">…</b></div>
+      <button id="newbtn">new player</button>
+    </div>
+
+    <div id="log"></div>
+
+    <div class="foot">
+      Open this page in another tab to play as a different person — each tab gets its own
+      browser-generated identity and a faucet grant. The pot pays out 90% to the winner every 3rd entry;
+      the winner is selected by the hash of a later Bitcoin block, so no one can predict or grind it.
+    </div>
+  </div>
+  <script type="module" src="/bundle.js"></script>
+</body>
+</html>
