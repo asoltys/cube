@@ -16,13 +16,13 @@ impl OP_SWAP {
             return Ok(());
         }
 
-        // Clone the second-to-top stack item.
-        let second_to_top_item = stack_holder.item_by_depth(1)?;
-
-        // Remove the second-to-top stack item.
-        stack_holder.remove_item_by_depth(1)?;
-
-        // Push the item to the stack.
+        // Swap the top two items. Note: `push`/`pop` operate on the end of the
+        // backing vec (the top), whereas `item_by_depth`/`remove_item_by_depth`
+        // index from the front (the bottom). Popping both and pushing them back
+        // in reverse order swaps the true top two regardless of that convention.
+        let top_item = stack_holder.pop()?;
+        let second_to_top_item = stack_holder.pop()?;
+        stack_holder.push(top_item)?;
         stack_holder.push(second_to_top_item)?;
 
         // Increment the ops counter.
