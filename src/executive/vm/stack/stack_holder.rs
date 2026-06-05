@@ -17,6 +17,8 @@ pub struct StackHolder {
     contract_id: [u8; 32],
     // Timestamp.
     timestamp: u64,
+    // Block hash anchoring this execution to Bitcoin (entropy source).
+    block_hash: [u8; 32],
     // Payable value allocated.
     payable_allocation_value: u32,
     // Payable value spent.
@@ -73,6 +75,7 @@ impl<'a> StackHolder {
             caller,
             contract_id,
             timestamp,
+            block_hash: [0u8; 32],
             payable_allocation_value,
             payable_spent_value: 0,
             main_stack: Stack::new(),
@@ -136,6 +139,16 @@ impl<'a> StackHolder {
     /// Returns the timestamp.
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+
+    /// Returns the block hash anchoring this execution.
+    pub fn block_hash(&self) -> [u8; 32] {
+        self.block_hash
+    }
+
+    /// Sets the block hash anchoring this execution.
+    pub fn set_block_hash(&mut self, block_hash: [u8; 32]) {
+        self.block_hash = block_hash;
     }
 
     /// Returns the payable value allocated.

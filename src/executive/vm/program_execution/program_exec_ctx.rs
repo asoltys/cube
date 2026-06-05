@@ -132,6 +132,8 @@ impl ProgramExecCtx {
             method_index,
             args_as_stack_items,
             timestamp,
+            // No anchoring block hash is plumbed through this (call-pool) path yet.
+            [0u8; 32],
             ops_budget,
             ops_price,
             internal_ops_counter,

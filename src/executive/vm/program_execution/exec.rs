@@ -23,8 +23,9 @@ use crate::{
                 },
                 call::{op_call::OP_CALL, op_callext::OP_CALLEXT},
                 callinfo::{
-                    op_caller::OP_CALLER, op_opsbudget::OP_OPSBUDGET, op_opscounter::OP_OPSCOUNTER,
-                    op_opsprice::OP_OPSPRICE, op_timestamp::OP_TIMESTAMP,
+                    op_blockhash::OP_BLOCKHASH, op_caller::OP_CALLER, op_opsbudget::OP_OPSBUDGET,
+                    op_opscounter::OP_OPSCOUNTER, op_opsprice::OP_OPSPRICE,
+                    op_timestamp::OP_TIMESTAMP,
                 },
                 coin::{
                     op_ext_balance::OP_EXT_BALANCE, op_self_balance::OP_SELF_BALANCE,
@@ -113,6 +114,8 @@ pub async fn execute(
     arg_values: Vec<StackItem>,
     // The timestamp.
     timestamp: u64,
+    // The block hash anchoring this execution to Bitcoin (entropy source).
+    block_hash: [u8; 32],
     // The ops budget.
     ops_budget: u32,
     // The ops price.
@@ -227,6 +230,9 @@ pub async fn execute(
         Ok(stack_holder) => stack_holder,
         Err(error) => return Err(ExecutionError::StackHolderInitializationError(error)),
     };
+
+    // Make the anchoring block hash available to OP_BLOCKHASH.
+    stack_holder.set_block_hash(block_hash);
 
     let opcodes = executable_method.script();
     let opcodes_length = opcodes.len();
@@ -736,6 +742,10 @@ pub async fn execute(
                 OP_TIMESTAMP::execute(&mut stack_holder)
                     .map_err(|error| ExecutionError::OpcodeExecutionError(error))?;
             }
+            Opcode::OP_BLOCKHASH(OP_BLOCKHASH) => {
+                OP_BLOCKHASH::execute(&mut stack_holder)
+                    .map_err(|error| ExecutionError::OpcodeExecutionError(error))?;
+            }
             // Call opcodes.
             Opcode::OP_CALL(_) => {
                 // If this is not an active execution, skip the opcode.
@@ -756,6 +766,7 @@ pub async fn execute(
                     method_index_to_be_called,
                     call_arg_values,
                     timestamp,  // Timestamp is the same as the current timestamp.
+                    block_hash, // Anchoring block hash is the same as the current execution.
                     ops_budget, // Ops budget is the same as the current ops budget.
                     ops_price,  // Ops price is the same as the current ops price.
                     stack_holder.internal_ops_counter(), // Remainder of the internal ops counter passed to the next call.
@@ -794,6 +805,7 @@ pub async fn execute(
                     method_index_to_be_called,
                     call_arg_values,
                     timestamp,  // Timestamp is the same as the current timestamp.
+                    block_hash, // Anchoring block hash is the same as the current execution.
                     ops_budget, // Ops budget is the same as the current ops budget.
                     ops_price,  // Ops price is the same as the current ops price.
                     stack_holder.internal_ops_counter(), // Remainder of the internal ops counter passed to the next call.

@@ -17,8 +17,8 @@ use super::opcodes::{
     },
     call::{op_call::OP_CALL, op_callext::OP_CALLEXT},
     callinfo::{
-        op_caller::OP_CALLER, op_opsbudget::OP_OPSBUDGET, op_opscounter::OP_OPSCOUNTER,
-        op_opsprice::OP_OPSPRICE, op_timestamp::OP_TIMESTAMP,
+        op_blockhash::OP_BLOCKHASH, op_caller::OP_CALLER, op_opsbudget::OP_OPSBUDGET,
+        op_opscounter::OP_OPSCOUNTER, op_opsprice::OP_OPSPRICE, op_timestamp::OP_TIMESTAMP,
     },
     digest::{
         op_blake2bvar::OP_BLAKE2BVAR, op_blake2svar::OP_BLAKE2SVAR, op_hash160::OP_HASH160,
@@ -221,6 +221,10 @@ pub enum Opcode {
     OP_MWRITE(OP_MWRITE),
     OP_MREAD(OP_MREAD),
     OP_MFREE(OP_MFREE),
+    // Block info — appended at the END so serde variant indices of all existing
+    // opcodes are unchanged (the bincode-encoded archival batch records depend on
+    // declaration order). Bytecode (0xd3) and match-arm positions are independent.
+    OP_BLOCKHASH(OP_BLOCKHASH),
 }
 
 impl Display for Opcode {
@@ -348,6 +352,7 @@ impl Display for Opcode {
             Opcode::OP_OPSCOUNTER(_) => write!(f, "OP_OPSCOUNTER"),
             Opcode::OP_OPSPRICE(_) => write!(f, "OP_OPSPRICE"),
             Opcode::OP_TIMESTAMP(_) => write!(f, "OP_TIMESTAMP"),
+            Opcode::OP_BLOCKHASH(_) => write!(f, "OP_BLOCKHASH"),
             // Call
             Opcode::OP_CALL(_) => write!(f, "OP_CALL"),
             Opcode::OP_CALLEXT(_) => write!(f, "OP_CALLEXT"),

@@ -41,6 +41,7 @@ use crate::executive::opcode::opcodes::callinfo::op_caller::OP_CALLER;
 use crate::executive::opcode::opcodes::callinfo::op_opsbudget::OP_OPSBUDGET;
 use crate::executive::opcode::opcodes::callinfo::op_opscounter::OP_OPSCOUNTER;
 use crate::executive::opcode::opcodes::callinfo::op_opsprice::OP_OPSPRICE;
+use crate::executive::opcode::opcodes::callinfo::op_blockhash::OP_BLOCKHASH;
 use crate::executive::opcode::opcodes::callinfo::op_timestamp::OP_TIMESTAMP;
 use crate::executive::opcode::opcodes::coin::op_ext_balance::OP_EXT_BALANCE;
 use crate::executive::opcode::opcodes::coin::op_self_balance::OP_SELF_BALANCE;
@@ -276,6 +277,7 @@ impl OpcodeCompiler for Opcode {
             Opcode::OP_OPSCOUNTER(_) => Ok(OP_OPSCOUNTER::bytecode()),
             Opcode::OP_OPSPRICE(_) => Ok(OP_OPSPRICE::bytecode()),
             Opcode::OP_TIMESTAMP(_) => Ok(OP_TIMESTAMP::bytecode()),
+            Opcode::OP_BLOCKHASH(_) => Ok(OP_BLOCKHASH::bytecode()),
 
             // Call
             Opcode::OP_CALL(_) => Ok(OP_CALL::bytecode()),
@@ -561,6 +563,9 @@ impl OpcodeCompiler for Opcode {
             0xd0 => Ok(Opcode::OP_MWRITE(OP_MWRITE)),
             0xd1 => Ok(Opcode::OP_MREAD(OP_MREAD)),
             0xd2 => Ok(Opcode::OP_MFREE(OP_MFREE)),
+
+            // Block info
+            0xd3 => Ok(Opcode::OP_BLOCKHASH(OP_BLOCKHASH)),
 
             // Undefined
             _ => Err(OpcodeDecompileError::UndefinedOpcodeError),

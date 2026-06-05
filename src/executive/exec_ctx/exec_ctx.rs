@@ -36,6 +36,7 @@ use crate::{
     executive::exec_ctx::errors::apply_changes_error::ApplyChangesError,
 };
 use bit_vec::BitVec;
+use bitcoin::hashes::Hash;
 use bitcoin::OutPoint;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -713,7 +714,12 @@ impl ExecCtx {
                     }
                 }
                 Entry::Call(call) => {
-                    match self.execute_call_internal(&call, batch_timestamp).await {
+                    // The batch txid is this execution's Bitcoin anchor; expose it as OP_BLOCKHASH.
+                    let execution_block_hash = batch_txid.to_byte_array();
+                    match self
+                        .execute_call_internal(&call, batch_timestamp, execution_block_hash)
+                        .await
+                    {
                         Ok(fees) => {
                             executed_entries.push(Entry::new_call(call.clone()));
                             executed_entry_fees.push(fees);
@@ -859,8 +865,12 @@ impl ExecCtx {
         &mut self,
         call: &Call,
         execution_timestamp: u64,
+        execution_block_hash: [u8; 32],
     ) -> Result<Entry, CallExecutionError> {
-        match self.execute_call_internal(call, execution_timestamp).await {
+        match self
+            .execute_call_internal(call, execution_timestamp, execution_block_hash)
+            .await
+        {
             Ok(_) => Ok(Entry::new_call(call.clone())),
             Err(error) => Err(error),
         }

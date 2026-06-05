@@ -140,6 +140,7 @@ mod double_contract_tests {
             0, // method index
             arg_values,
             timestamp,
+            [0u8; 32], // anchoring block hash (unused by this contract)
             1_000_000, // ops budget
             0,         // ops price
             0,

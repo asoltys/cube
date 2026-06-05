@@ -830,7 +830,14 @@ impl SessionPool {
 
         let call_result = {
             let mut exec_ctx = self.exec_ctx.lock().await;
-            exec_ctx.execute_call(call, batch_timestamp).await
+            // The batch txid isn't finalized while the pool is still assembling the
+            // batch, so no anchoring block hash is available here yet. The authoritative
+            // OP_BLOCKHASH value is applied when the batch is executed (see exec_ctx).
+            // TODO: surface the confirming Bitcoin block hash to the pool path too.
+            let execution_block_hash = [0u8; 32];
+            exec_ctx
+                .execute_call(call, batch_timestamp, execution_block_hash)
+                .await
         };
 
         match call_result {

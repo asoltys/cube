@@ -16,6 +16,7 @@ impl ExecCtx {
         &mut self,
         call: &Call,
         execution_timestamp: u64,
+        execution_block_hash: [u8; 32],
     ) -> Result<EntryFees, CallExecutionError> {
         // 1 Resolve the caller account key.
         let account_key = call.account.account_key();
@@ -121,6 +122,7 @@ impl ExecCtx {
             call.method_index(),
             arg_values,
             execution_timestamp,
+            execution_block_hash,
             ops_budget,
             ops_price,
             0,
