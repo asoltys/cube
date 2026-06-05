@@ -50,9 +50,7 @@ mod lottery_v3 {
     const KEY_SEED: u8 = 0x73; // "s"
     const KEY_D: u8 = 0x64; // "d"
     const KEY_W: u8 = 0x77; // "w"
-    const KEY_LW: u8 = 0x4c; // "L" timestamp of the last win (for the daily guarantee)
     const DURATION: u8 = 120; // 2-minute rounds (timer starts at the first entry)
-    const DAY: u64 = 86_400; // guaranteed winner if no win for this long
     const ODDS_DENOM: u64 = 475; // house = rt * 475 -> win region rt is 1/476 of space (~0.21%)
 
     // Operator account that accrues the 1% rake (baked into the contract).
@@ -174,21 +172,10 @@ mod lottery_v3 {
         s.push(k(KEY_B)); s.push(sread());
         s.push(k(KEY_TOTAL)); s.push(sread());
         e(&mut s, Opcode::OP_SUB(OP_SUB)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt]
-        // house = (now - L >= DAY) ? 0 : rt * ODDS_DENOM
-        //   guaranteed (>=1 day since last win) -> house 0 -> certain winner
-        //   otherwise win region rt is 1/(ODDS_DENOM+1) of space -> 1% win odds
+        // house = rt * ODDS_DENOM  (win region rt is 1/(ODDS_DENOM+1) of space)
         e(&mut s, Opcode::OP_DUP(OP_DUP)); // [rt, rt]
-        s.push(k(KEY_LW)); s.push(sread()); // [rt, rt, L]
-        e(&mut s, Opcode::OP_TIMESTAMP(OP_TIMESTAMP)); // [rt, rt, L, now]
-        e(&mut s, Opcode::OP_SUB(OP_SUB)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt, rt, now-L]
-        s.push(push(le_bytes(DAY))); // [rt, rt, elapsed, DAY]
-        e(&mut s, Opcode::OP_GREATERTHANOREQUAL(OP_GREATERTHANOREQUAL)); // [rt, rt, guaranteed]
-        e(&mut s, Opcode::OP_IF(OP_IF));
-        e(&mut s, Opcode::OP_DROP(OP_DROP)); e(&mut s, Opcode::OP_FALSE(OP_FALSE)); // [rt, 0]
-        e(&mut s, Opcode::OP_ELSE(OP_ELSE));
         s.push(push(le_bytes(ODDS_DENOM))); e(&mut s, Opcode::OP_MUL(OP_MUL)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt, rt*475]
-        e(&mut s, Opcode::OP_ENDIF(OP_ENDIF)); // [rt, house]
-        e(&mut s, Opcode::OP_ADD(OP_ADD)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [space]
+        e(&mut s, Opcode::OP_ADD(OP_ADD)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [space = rt*476]
         s.push(k(KEY_SEED)); s.push(sread());
         e(&mut s, Opcode::OP_DIV(OP_DIV)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); e(&mut s, Opcode::OP_DROP(OP_DROP)); // [r]
         s.push(k(KEY_B)); s.push(sread()); e(&mut s, Opcode::OP_ADD(OP_ADD)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rg]
@@ -238,7 +225,6 @@ mod lottery_v3 {
         e(&mut s, Opcode::OP_TRANSFER(OP_TRANSFER)); // []
         for o in advance() { s.push(o); }
         s.push(k(KEY_D)); s.push(sread()); s.push(k(KEY_W)); s.push(swrite()); // w = d
-        e(&mut s, Opcode::OP_TIMESTAMP(OP_TIMESTAMP)); s.push(k(KEY_LW)); s.push(swrite()); // L = now
         e(&mut s, Opcode::OP_ENDIF(OP_ENDIF));
         e(&mut s, Opcode::OP_RETURNALL(OP_RETURNALL));
         s
@@ -327,8 +313,8 @@ mod lottery_v3 {
         for (i, p) in players.iter().enumerate() {
             enter(&reg, &cm, &sm, cid, *p, amounts[i], ts + i as u64).await;
         }
-        // First round ever: no prior win, so it's the guaranteed round -> house=0,
-        // space=15000. seed 5000 -> r=5000 -> [3000,6000) idx 2 (player 0x33).
+        // total=15000, house=rt*475, space=rt*476=7_140_000. seed 5000 -> r=5000,
+        // which is in the win region [0,15000) -> band [3000,6000) -> idx 2 (0x33).
         let mut seed = [0u8; 32]; seed[0] = 0x88; seed[1] = 0x13; // 0x1388 = 5000 LE
         execute(false, Caller::Account(players[0]), cid, 1, vec![], ts + DURATION as u64 + 1, seed, 1_000_000, 0, 0, 0, &sm, &cm, &reg)
             .await.unwrap_or_else(|e| panic!("close failed: {:?}", e));
