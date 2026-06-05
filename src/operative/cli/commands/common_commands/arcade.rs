@@ -31,11 +31,13 @@ use crate::inscriptive::utxo_set::utxo_set::UTXO_SET;
 use crate::operative::run_args::chain::Chain;
 use crate::transmutative::hash::sha256;
 use crate::transmutative::key::KeyHolder;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tokio::sync::broadcast;
 use bitcoin::hashes::Hash as _;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use chrono::Utc;
@@ -90,6 +92,13 @@ struct ArcadeState {
     last_winner: Arc<tokio::sync::Mutex<Option<String>>>,
     recent_draws: Arc<tokio::sync::Mutex<Vec<Value>>>,
     exec_lock: Arc<tokio::sync::Mutex<()>>,
+    tx: broadcast::Sender<()>, // "state changed" signal -> WebSocket push
+}
+
+impl ArcadeState {
+    fn notify(&self) {
+        let _ = self.tx.send(());
+    }
 }
 
 impl ArcadeState {
@@ -238,7 +247,11 @@ async fn round_view(s: &ArcadeState) -> (u64, u64, u64, u64, u64, u64, u64, u64,
 }
 
 async fn get_state(State(s): State<ArcadeState>, Query(params): Query<HashMap<String, String>>) -> Json<Value> {
-    let (g, rs, t, k, d, w, total, b, count, _seed) = round_view(&s).await;
+    Json(build_state(&s, params.get("account").map(|x| x.as_str())).await)
+}
+
+async fn build_state(s: &ArcadeState, account: Option<&str>) -> Value {
+    let (g, rs, t, k, d, w, total, b, count, _seed) = round_view(s).await;
     let round_total = total.saturating_sub(b);
     let treasury = { s.coin_manager.lock().await.get_contract_balance(s.contract_id).unwrap_or(0) };
     let now = Utc::now().timestamp() as u64;
@@ -267,7 +280,7 @@ async fn get_state(State(s): State<ArcadeState>, Query(params): Query<HashMap<St
         "entry_cost_hint": FAUCET_GRANT,
     });
 
-    if let Some(acct_hex) = params.get("account") {
+    if let Some(acct_hex) = account {
         if let Some(account_key) = parse_hex::<32>(acct_hex) {
             let (registered, reg_index) = {
                 let reg = s.registery.lock().await;
@@ -293,7 +306,40 @@ async fn get_state(State(s): State<ArcadeState>, Query(params): Query<HashMap<St
             });
         }
     }
-    Json(out)
+    out
+}
+
+// WebSocket: push fresh state on every change (and a heartbeat). The client
+// holds one connection instead of polling.
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(s): State<ArcadeState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let account = params.get("account").cloned();
+    ws.on_upgrade(move |socket| ws_loop(socket, s, account))
+}
+
+async fn ws_loop(mut socket: WebSocket, s: ArcadeState, account: Option<String>) {
+    let mut rx = s.tx.subscribe();
+    let acct = account.as_deref();
+    // initial snapshot
+    let st = build_state(&s, acct).await;
+    if socket.send(Message::Text(st.to_string())).await.is_err() {
+        return;
+    }
+    loop {
+        match rx.recv().await {
+            Ok(_) => {
+                let st = build_state(&s, acct).await;
+                if socket.send(Message::Text(st.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -330,6 +376,7 @@ async fn post_faucet(State(s): State<ArcadeState>, Json(body): Json<FaucetReq>) 
         s.registery.lock().await.get_account_info_by_account_key(account_key).map(|(_, _, idx, _)| idx).unwrap_or(0)
     };
     let balance = { s.coin_manager.lock().await.get_account_balance(account_key).unwrap_or(0) };
+    s.notify();
     Json(json!({ "registery_index": reg_index, "balance": balance, "granted": FAUCET_GRANT }))
 }
 
@@ -368,6 +415,7 @@ async fn post_call(State(s): State<ArcadeState>, Json(body): Json<CallReq>) -> J
     match run_call(&s, &call).await {
         Ok(_) => {
             s.mine(1); // advance the tip so the round seed evolves
+            s.notify();
             let balance = { s.coin_manager.lock().await.get_account_balance(account_key).unwrap_or(0) };
             Json(json!({ "ok": true, "balance": balance }))
         }
@@ -438,6 +486,8 @@ async fn lifecycle(s: ArcadeState) {
                 let mut feed = s.recent_draws.lock().await;
                 feed.insert(0, event);
                 feed.truncate(12);
+                drop(feed);
+                s.notify();
             }
             Err(e) => eprintln!("arcade: settle failed: {}", e),
         }
@@ -497,6 +547,7 @@ pub async fn run_arcade(
         .map(|(_, _, idx, _)| idx)
         .unwrap_or(0);
 
+    let (tx, _rx) = broadcast::channel::<()>(64);
     let state = ArcadeState {
         engine_key,
         contract_id,
@@ -520,11 +571,20 @@ pub async fn run_arcade(
         last_winner: Arc::new(tokio::sync::Mutex::new(None)),
         recent_draws: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         exec_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tx: tx.clone(),
     };
 
     tokio::spawn(lifecycle(state.clone()));
+    // Heartbeat: nudge WS clients periodically (reaps dead sockets, resync safety).
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let _ = tx.send(());
+        }
+    });
 
     let app = Router::new()
+        .route("/ws", get(ws_handler))
         .route("/", get(serve_index))
         .route("/bundle.js", get(serve_bundle))
         .route("/api/state", get(get_state))
