@@ -108,8 +108,8 @@ mod double_contract_tests {
             let mut c = coin_manager.lock().await;
             c.register_contract(contract_id, treasury)
                 .map_err(|e| format!("coin.register_contract: {:?}", e))?;
-            // Register the caller account with zero balance.
-            c.register_account(caller_key, 0)
+            // Register the caller with a balance so it can pay the payable amount in.
+            c.register_account(caller_key, 20_000)
                 .map_err(|e| format!("coin.register_account: {:?}", e))?;
         }
         {
@@ -176,10 +176,11 @@ mod double_contract_tests {
 
     #[tokio::test]
     async fn double_pays_2x_within_cap() {
-        // Send 5000, expect 10000 back; treasury 50000 -> 40000.
+        // Caller starts 20000, pays 5000 in (payable intake), receives 2x=10000 back.
+        // Caller: 20000 - 5000 + 10000 = 25000. Treasury: 50000 + 5000 - 10000 = 45000.
         let (caller_bal, contract_bal) = run_double(5000, 50_000).await.expect("should succeed");
-        assert_eq!(caller_bal, 10_000, "caller should receive 2X");
-        assert_eq!(contract_bal, 40_000, "treasury should drop by 2X");
+        assert_eq!(caller_bal, 25_000, "caller nets +5000 (paid 5000, got 10000)");
+        assert_eq!(contract_bal, 45_000, "treasury nets -5000 (took 5000, paid 10000)");
     }
 
     #[tokio::test]

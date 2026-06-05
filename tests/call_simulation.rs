@@ -306,12 +306,14 @@ mod call_simulation {
                 .map_err(|e| format!("call execute_batch: {:?}", e))?;
         }
 
-        // If we got here, the call survived execute_batch. Verify the 2x payout.
+        // If we got here, the call survived execute_batch. Verify the economics:
+        // payable 5000 is collected into the contract, then 2x=10000 is paid out.
+        // Treasury: 40000 + 5000 - 10000 = 35000.
         let cm = coin_manager.lock().await;
         let contract_bal = cm.get_contract_balance(contract_id).unwrap_or(0);
         println!("caller balance: {:?}", cm.get_account_balance(public_key));
         println!("contract balance: {}", contract_bal);
-        assert_eq!(contract_bal, 30_000, "contract should have paid out 2x (10k)");
+        assert_eq!(contract_bal, 35_000, "treasury nets -5000 (took 5000 in, paid 10000 out)");
         Ok(())
     }
 }

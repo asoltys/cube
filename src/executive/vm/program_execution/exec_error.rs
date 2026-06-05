@@ -1,4 +1,7 @@
 use crate::executive::stack::{stack_error::StackError, stack_item::StackItem};
+use crate::inscriptive::coin_manager::errors::balance_update_errors::{
+    CMAccountBalanceDownError, CMContractBalanceUpError,
+};
 use std::fmt;
 
 /// A section of executable block in the `Contract`.
@@ -32,6 +35,10 @@ pub enum ExecutionError {
     PayableAllocationCallerIsNotAnAccountError,
     /// Payable with internal call error.
     PayableWithInternalCallError,
+    /// Failed to debit the payable amount from the caller's account.
+    PayableAccountBalanceDownError(CMAccountBalanceDownError),
+    /// Failed to credit the payable amount to the contract.
+    PayableContractBalanceUpError(CMContractBalanceUpError),
     /// Invalid stack ending error.
     InvalidStackEndingError,
     /// Base ops price mismatch error.
@@ -84,6 +91,12 @@ impl fmt::Display for ExecutionError {
             }
             ExecutionError::PayableWithInternalCallError => {
                 write!(f, "Payable with internal call")
+            }
+            ExecutionError::PayableAccountBalanceDownError(error) => {
+                write!(f, "Payable account balance down error: {:?}", error)
+            }
+            ExecutionError::PayableContractBalanceUpError(error) => {
+                write!(f, "Payable contract balance up error: {:?}", error)
             }
             ExecutionError::InvalidStackEndingError => {
                 write!(f, "Invalid stack ending")

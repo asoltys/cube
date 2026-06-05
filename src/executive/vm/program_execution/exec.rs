@@ -183,7 +183,7 @@ pub async fn execute(
             // TODO: CHECK ENOUGH BALANCE.
 
             // If a payable value is allocted, the caller must also be an account.
-            let _caller_key = match caller {
+            let caller_key = match caller {
                 Caller::Account(key) => key,
                 Caller::Contract(_) => {
                     return Err(ExecutionError::PayableAllocationCallerIsNotAnAccountError);
@@ -195,10 +195,17 @@ pub async fn execute(
                 return Err(ExecutionError::PayableWithInternalCallError);
             }
 
-            // Insert the allocation into the accountant.
-            //if let Err(error) = accountant.insert_alloc(caller_key, payable_allocation_value) {
-            //    return Err(ExecutionError::AccountantAllocationInsertionError(error));
-            //}
+            // Move the payable amount from the caller's account into the contract
+            // treasury, before the method runs (so the script sees the funds in).
+            {
+                let mut _coin_manager = coin_manager.lock().await;
+                _coin_manager
+                    .account_balance_down(caller_key, payable_allocation_value as u64)
+                    .map_err(ExecutionError::PayableAccountBalanceDownError)?;
+                _coin_manager
+                    .contract_balance_up(contract_id, payable_allocation_value as u64)
+                    .map_err(ExecutionError::PayableContractBalanceUpError)?;
+            }
 
             payable_allocation_value
         }
