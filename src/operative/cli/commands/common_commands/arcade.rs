@@ -51,8 +51,8 @@ const KEY_R: u8 = 0x72;
 const ROUND: u64 = 3;
 const ENTRY_COST: u64 = 10_000;
 const PAYOUT: u64 = 27_000;
-const FAUCET_TOPUP_TO: u64 = 50_000;
-const FAUCET_TOPUP_BELOW: u64 = ENTRY_COST;
+const FAUCET_TOPUP_TO: u64 = 100_000;
+const FAUCET_TOPUP_BELOW: u64 = 30_000;
 
 #[derive(Clone)]
 struct ArcadeState {
@@ -141,11 +141,23 @@ async fn read_state_uint(s: &ArcadeState, key: u8) -> u64 {
 }
 
 // ---------- handlers ----------
-async fn serve_index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+// Serve embedded assets, or live from CUBE_ARCADE_ASSETS dir if set (for UI iteration).
+fn asset(name: &str, embedded: &'static str) -> String {
+    if let Ok(dir) = std::env::var("CUBE_ARCADE_ASSETS") {
+        if let Ok(s) = std::fs::read_to_string(format!("{}/{}", dir, name)) {
+            return s;
+        }
+    }
+    embedded.to_string()
+}
+async fn serve_index() -> Html<String> {
+    Html(asset("index.html", INDEX_HTML))
 }
 async fn serve_bundle() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], BUNDLE_JS)
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        asset("bundle.js", BUNDLE_JS),
+    )
 }
 
 async fn contract_registery_index(s: &ArcadeState) -> u64 {

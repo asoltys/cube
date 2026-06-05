@@ -152,12 +152,27 @@ async function refresh() {
   return st;
 }
 
+function friendlyError(raw) {
+  raw = raw || '';
+  if (/BalanceWouldGoNegative|PayableAccountBalanceDown/.test(raw)) return 'not enough balance for a 10000 entry';
+  if (/signature/i.test(raw)) return 'signature rejected';
+  if (/already.*registered/i.test(raw)) return 'already registered';
+  return raw.length > 110 ? raw.slice(0, 110) + '…' : raw;
+}
+
 async function doEnter() {
   $('enterbtn').disabled = true;
-  flash('Signing entry in-browser (BLS)…');
   try {
+    // Top up from the faucet if balance is too low for an entry.
+    const st = await api('/api/state?account=' + ME.accountKey, null);
+    if (!st.account || st.account.balance < st.entry_cost) {
+      flash('Low balance — topping up from faucet…');
+      await ensureFunded();
+    }
+    flash('Signing entry in-browser (BLS)…');
     const r = await buildAndSendCall(0, [{ type: 'payable', value: 10000 }]);
-    if (r.ok) flash('Entered! paid 10000 in.', 'ok'); else flash('Enter failed: ' + (r.error || JSON.stringify(r)), 'err');
+    if (r.ok) flash('Entered! paid 10000 into the pot.', 'ok');
+    else flash('Enter failed: ' + friendlyError(r.error), 'err');
   } catch (e) { flash('Enter error: ' + e.message, 'err'); }
   await refresh();
   $('enterbtn').disabled = false;
@@ -169,7 +184,7 @@ async function doDraw() {
   try {
     const r = await buildAndSendCall(1, []);
     if (r.ok) flash('Draw complete! winner: ' + short(r.winner || '') + (r.won ? '  (you won ' + r.payout + '!)' : ''), 'ok');
-    else flash('Draw failed: ' + (r.error || JSON.stringify(r)), 'err');
+    else flash('Draw failed: ' + friendlyError(r.error), 'err');
   } catch (e) { flash('Draw error: ' + e.message, 'err'); }
   await refresh();
 }
