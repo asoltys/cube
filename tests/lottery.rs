@@ -221,6 +221,16 @@ mod lottery {
         use cube::executive::executable::compiler::compiler::ProgramCompiler;
         let program = lottery_program();
         let bytes = program.compile().expect("compile");
+        // Guard against opcode bytecode()/decompiler mismatches: the bytes we
+        // deploy must decompile back to the identical program.
+        let roundtrip = {
+            let mut stream = bytes.clone().into_iter();
+            Program::decompile(&mut stream).expect("decompile")
+        };
+        assert_eq!(
+            roundtrip, program,
+            "compiled lottery bytes must survive a compile->decompile round-trip"
+        );
         println!("LOTTERY_PROGRAM_BYTES=0x{}", hex::encode(&bytes));
         println!("LOTTERY_CONTRACT_ID=0x{}", hex::encode(program.contract_id()));
     }

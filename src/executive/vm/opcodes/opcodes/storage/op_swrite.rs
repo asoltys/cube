@@ -67,9 +67,9 @@ impl OP_SWRITE {
         Ok(())
     }
 
-    /// Returns the bytecode for the `OP_SWRITE` opcode (0xc8).
+    /// Returns the bytecode for the `OP_SWRITE` opcode (0xcd).
     pub fn bytecode() -> Vec<u8> {
-        vec![0xc8]
+        vec![0xcd]
     }
 }
 
