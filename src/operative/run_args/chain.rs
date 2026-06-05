@@ -7,6 +7,8 @@ pub enum Chain {
     Signet,
     // For mainnet.
     Mainnet,
+    // For a local regtest network.
+    Regtest,
 }
 
 impl ToString for Chain {
@@ -15,6 +17,7 @@ impl ToString for Chain {
             Chain::Testbed => "testbed".to_string(),
             Chain::Signet => "signet".to_string(),
             Chain::Mainnet => "mainnet".to_string(),
+            Chain::Regtest => "regtest".to_string(),
         }
     }
 }

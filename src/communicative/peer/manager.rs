@@ -15,6 +15,7 @@ pub fn engine_key(chain: Chain) -> [u8; 32] {
     match chain {
         Chain::Signet | Chain::Testbed => baked::SIGNET_ENGINE_PUBLIC_KEY,
         Chain::Mainnet => baked::MAINNET_ENGINE_PUBLIC_KEY,
+        Chain::Regtest => baked::REGTEST_ENGINE_PUBLIC_KEY,
     }
 }
 

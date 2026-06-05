@@ -27,6 +27,7 @@ pub fn port_number(chain: Chain) -> u16 {
     match chain {
         Chain::Signet | Chain::Testbed => baked::SIGNET_PORT,
         Chain::Mainnet => baked::MAINNET_PORT,
+        Chain::Regtest => baked::REGTEST_PORT,
     }
 }
 
@@ -72,6 +73,12 @@ pub async fn connect_nns(
     nns_client: &NNSClient,
     chain: Chain,
 ) -> Result<TcpStream, TCPError> {
+    // Local override: connect to a co-located peer directly (e.g. a private engine
+    // on the same host whose NNS-advertised address is an unreachable public IP).
+    if let Ok(override_ip) = std::env::var("CUBE_ENGINE_ADDR") {
+        return connect(&override_ip, chain).await;
+    }
+
     let npub = match nns_key.to_npub() {
         Some(npub) => npub,
         None => return Err(TCPError::ConnErr),

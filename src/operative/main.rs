@@ -184,6 +184,7 @@ fn genesis(args: &Vec<String>) {
                 "signet" => Chain::Signet,
                 "mainnet" => Chain::Mainnet,
                 "testbed" => Chain::Testbed,
+                "regtest" => Chain::Regtest,
                 _ => {
                     eprintln!("{}", "Invalid <chain>.".red());
                     return;
@@ -284,6 +285,7 @@ fn run(args: &Vec<String>) {
     let chain = match args[2].to_lowercase().as_str() {
         "signet" => Chain::Signet,
         "mainnet" => Chain::Mainnet,
+        "regtest" => Chain::Regtest,
         "testbed" => {
             println!("{}", "Testbed is for local tests only (./tests/).".red());
             return;

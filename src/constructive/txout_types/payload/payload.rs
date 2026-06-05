@@ -257,6 +257,7 @@ pub fn genesis_payload(chain: Chain) -> Payload {
         Chain::Testbed => baked::SIGNET_ENGINE_PUBLIC_KEY,
         Chain::Signet => baked::SIGNET_ENGINE_PUBLIC_KEY,
         Chain::Mainnet => baked::MAINNET_ENGINE_PUBLIC_KEY,
+        Chain::Regtest => baked::REGTEST_ENGINE_PUBLIC_KEY,
     };
 
     // 2 Get the payload bytes.
@@ -267,6 +268,7 @@ pub fn genesis_payload(chain: Chain) -> Payload {
         Chain::Testbed => baked::SIGNET_GENESIS_PAYLOAD_TX_ID,
         Chain::Signet => baked::SIGNET_GENESIS_PAYLOAD_TX_ID,
         Chain::Mainnet => baked::MAINNET_GENESIS_PAYLOAD_TX_ID,
+        Chain::Regtest => baked::REGTEST_GENESIS_PAYLOAD_TX_ID,
     };
 
     // 4 Get the genesis payload vout.
@@ -274,6 +276,7 @@ pub fn genesis_payload(chain: Chain) -> Payload {
         Chain::Testbed => baked::SIGNET_GENESIS_PAYLOAD_VOUT,
         Chain::Signet => baked::SIGNET_GENESIS_PAYLOAD_VOUT,
         Chain::Mainnet => baked::MAINNET_GENESIS_PAYLOAD_VOUT,
+        Chain::Regtest => baked::REGTEST_GENESIS_PAYLOAD_VOUT,
     };
 
     // 5 Get the genesis payload amount.
@@ -281,6 +284,7 @@ pub fn genesis_payload(chain: Chain) -> Payload {
         Chain::Testbed => baked::SIGNET_GENESIS_PAYLOAD_AMOUNT,
         Chain::Signet => baked::SIGNET_GENESIS_PAYLOAD_AMOUNT,
         Chain::Mainnet => baked::MAINNET_GENESIS_PAYLOAD_AMOUNT,
+        Chain::Regtest => baked::REGTEST_GENESIS_PAYLOAD_AMOUNT,
     };
 
     // 6 Construct the genesis payload without location.

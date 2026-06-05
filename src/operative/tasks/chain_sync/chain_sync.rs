@@ -93,6 +93,7 @@ impl ChainSync for SYNC_MANAGER {
         let sync_start_height = match chain {
             Chain::Signet | Chain::Testbed => baked::SIGNET_SYNC_START_HEIGHT,
             Chain::Mainnet => baked::MAINNET_SYNC_START_HEIGHT,
+            Chain::Regtest => baked::REGTEST_SYNC_START_HEIGHT,
         };
 
         // Initialize the Bitcoin node's chain tip.

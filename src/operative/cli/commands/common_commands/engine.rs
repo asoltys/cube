@@ -5,6 +5,7 @@ use crate::operative::run_args::chain::Chain;
 pub fn engine_command(chain: Chain) {
     let key = match chain {
         Chain::Mainnet => baked::MAINNET_ENGINE_PUBLIC_KEY,
+        Chain::Regtest => baked::REGTEST_ENGINE_PUBLIC_KEY,
         Chain::Signet | Chain::Testbed => baked::SIGNET_ENGINE_PUBLIC_KEY,
     };
     println!("{}", hex::encode(key));

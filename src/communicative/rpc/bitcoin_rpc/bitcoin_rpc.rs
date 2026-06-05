@@ -40,6 +40,11 @@ pub fn validate_rpc(
                 return Err(BitcoinRPCValidateRPCError::WrongChain);
             }
         }
+        bitcoin::network::Network::Regtest => {
+            if chain != Chain::Regtest {
+                return Err(BitcoinRPCValidateRPCError::WrongChain);
+            }
+        }
         _ => return Err(BitcoinRPCValidateRPCError::WrongChain),
     };
 

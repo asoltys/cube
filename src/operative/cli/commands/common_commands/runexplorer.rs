@@ -399,6 +399,7 @@ fn mempool_tx_url(chain: Chain, txid: &str) -> Option<String> {
         Chain::Mainnet => Some(format!("https://mempool.space/tx/{}", txid)),
         Chain::Signet => Some(format!("https://mempool.space/signet/tx/{}", txid)),
         Chain::Testbed => None,
+        Chain::Regtest => None,
     }
 }
 

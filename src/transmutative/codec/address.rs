@@ -14,6 +14,7 @@ fn hrp_from_chain(chain: Chain) -> Option<Hrp> {
     match chain {
         Chain::Signet | Chain::Testbed => Hrp::parse("tb").ok(),
         Chain::Mainnet => Hrp::parse("bc").ok(),
+        Chain::Regtest => Hrp::parse("bcrt").ok(),
     }
 }
 
@@ -89,6 +90,11 @@ pub fn address_to_spk(chain: Chain, address: &str) -> Option<ScriptPubKey> {
         }
         Chain::Mainnet => {
             if hrp != Hrp::parse("bc").expect("invalid hrp") {
+                return None;
+            }
+        }
+        Chain::Regtest => {
+            if hrp != Hrp::parse("bcrt").expect("invalid hrp") {
                 return None;
             }
         }
