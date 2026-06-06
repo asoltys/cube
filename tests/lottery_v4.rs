@@ -368,4 +368,36 @@ mod lottery_v4 {
 
         println!("LOTTERY v4 NON-CUSTODIAL: stakes are exitable shadow claims (Σ == pot) while the round is live; a win zeroes claims and pays the winner 99% / operator 1%; pot fully resolved. derive_contract_exit_trees renders the live claims as unilaterally-exitable VTXOs.");
     }
+
+    #[tokio::test]
+    async fn rollover_preserves_shadow_claims_no_custody_gap() {
+        let (reg, cm, sm, cid, players, _operator, ts) = setup().await;
+        let amounts: [u64; 5] = [1000, 2000, 3000, 4000, 5000]; // pot 15000
+        for (i, p) in players.iter().enumerate() {
+            enter(&reg, &cm, &sm, cid, *p, amounts[i], ts + i as u64).await;
+        }
+        // A seed that lands in the house zone => ROLLOVER (no winner). space =
+        // 15000*476 = 7_140_000; r = seed mod space must be >= 15000. seed 100_000.
+        let mut seed = [0u8; 32]; seed[0] = 0xa0; seed[1] = 0x86; seed[2] = 0x01; // 0x0186a0 = 100000 LE
+        execute(false, Caller::Account(players[0]), cid, 1, vec![], ts + DURATION as u64 + 1, seed, 1_000_000, 0, 0, 0, &sm, &cm, &reg)
+            .await.unwrap_or_else(|e| panic!("close failed: {:?}", e));
+        cm.lock().await.apply_changes().unwrap(); sm.lock().await.apply_changes().unwrap();
+        execute(false, Caller::Account(players[0]), cid, 2, vec![StackItem::from_stack_uint(StackUint::from(0u64))], ts + DURATION as u64 + 2, seed, 1_000_000, 0, 0, 0, &sm, &cm, &reg)
+            .await.unwrap_or_else(|e| panic!("settle (rollover) failed: {:?}", e));
+        cm.lock().await.apply_changes().unwrap(); sm.lock().await.apply_changes().unwrap();
+
+        // After ROLLOVER the pot carries AND every stake must remain an exitable
+        // shadow claim — no custody gap (jackpot must == Σ claims).
+        let c = cm.lock().await;
+        let pot = c.get_contract_balance(cid).unwrap();
+        assert_eq!(pot, 15000, "rollover keeps the pot");
+        let enumerated = c.get_contract_shadow_allocations_in_satoshis(cid).unwrap();
+        let claimed: u64 = enumerated.iter().map(|(_, v)| v).sum();
+        for (i, p) in players.iter().enumerate() {
+            let v = c.get_shadow_alloc_value_in_satoshis(cid, *p).unwrap_or(0);
+            assert_eq!(v, amounts[i], "player {} stake-claim must persist across rollover", i);
+        }
+        assert_eq!(claimed, pot, "NO CUSTODY GAP: Σ exitable claims == jackpot after rollover");
+        println!("v4 ROLLOVER: pot {} fully attributed to {} exitable claims after rollover (no custody gap)", pot, enumerated.len());
+    }
 }
