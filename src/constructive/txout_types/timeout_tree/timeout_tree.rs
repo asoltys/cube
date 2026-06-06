@@ -69,6 +69,39 @@ fn xonly(key: &[u8; 32]) -> Option<XOnlyPublicKey> {
     XOnlyPublicKey::from_slice(key).ok()
 }
 
+/// The Projector key set for a contract pot's funding (covenant) output: every
+/// participant projected by their value, plus the engine projected by the total.
+/// Shared by [`TimeoutTree`] and the cross-batch refresh so the covenant key is
+/// computed identically on both sides.
+pub fn funding_keys_and_values(
+    engine_key: [u8; 32],
+    allocations: &[([u8; 32], u64)],
+) -> Option<Vec<(secp::Point, u64)>> {
+    let total_value_in_satoshis: u64 = allocations.iter().map(|(_, v)| *v).sum();
+    let mut keys_and_values: Vec<(secp::Point, u64)> = Vec::with_capacity(allocations.len() + 1);
+    for (account_key, value) in allocations.iter() {
+        keys_and_values.push((account_key.into_point().ok()?, *value));
+    }
+    keys_and_values.push((engine_key.into_point().ok()?, total_value_in_satoshis));
+    Some(keys_and_values)
+}
+
+/// The funding (pot) covenant taproot: a Projector value-bound MuSig2 key path
+/// plus a server-expiry (`<height> CLTV DROP <engine> CHECKSIG`) script path.
+pub fn funding_taproot(
+    engine_key: [u8; 32],
+    allocations: &[([u8; 32], u64)],
+    expiry_height: u32,
+) -> Option<TapRoot> {
+    let engine_x = xonly(&engine_key)?;
+    let keys_and_values = funding_keys_and_values(engine_key, allocations)?;
+    let funding_inner = key_projector_agg(&keys_and_values, None)?.agg_inner_key();
+    Some(TapRoot::key_and_script_path_single(
+        funding_inner,
+        TapLeaf::new(expiry_script(expiry_height, &engine_x).to_bytes()),
+    ))
+}
+
 /// A single participant's VTXO leaf in the timeout tree.
 pub struct VtxoLeaf {
     pub account_key: [u8; 32],
@@ -189,22 +222,9 @@ impl TimeoutTree {
             }
         }
 
-        let engine_pt = engine_key.into_point().ok()?;
-        let engine_x = xonly(&engine_key)?;
-
-        // Funding (pot) covenant key: every participant projected by their value,
-        // plus the engine projected by the total — value-bound over the whole pot.
+        // Funding (pot) covenant: value-bound over the whole pot (shared helper).
         let total_value_in_satoshis: u64 = allocations.iter().map(|(_, v)| *v).sum();
-        let mut funding_keys_and_values: Vec<(secp::Point, u64)> = Vec::new();
-        for (account_key, value) in allocations.iter() {
-            funding_keys_and_values.push((account_key.into_point().ok()?, *value));
-        }
-        funding_keys_and_values.push((engine_pt, total_value_in_satoshis));
-        let funding_inner = key_projector_agg(&funding_keys_and_values, None)?.agg_inner_key();
-        let funding_taproot = TapRoot::key_and_script_path_single(
-            funding_inner,
-            TapLeaf::new(expiry_script(expiry_height, &engine_x).to_bytes()),
-        );
+        let funding_taproot = funding_taproot(engine_key, allocations, expiry_height)?;
 
         // One VTXO leaf per participant.
         let mut leaves = Vec::with_capacity(allocations.len());
