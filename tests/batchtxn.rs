@@ -203,6 +203,7 @@ mod batchtxn_test {
             None,
             1,
             &engine_key_holder,
+            &std::collections::HashMap::new(),
         )
         .expect("Failed to construct signed batch transaction.");
 

@@ -5,6 +5,7 @@ use crate::constructive::bitcoiny::batch_txn::{
 };
 use crate::constructive::entry::entry::entry::Entry;
 use crate::constructive::txout_types::lift::lift::Lift;
+use crate::constructive::txout_types::lift::lift_versions::liftv2::liftv2::return_liftv2_taproot;
 use crate::constructive::txout_types::payload::payload::Payload;
 use crate::constructive::txout_types::projector::projector::Projector;
 use crate::transmutative::codec::varint::encode_varint;
@@ -14,6 +15,7 @@ use crate::transmutative::secp::schnorr::{self, SchnorrSigningMode};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Bare transaction fields:
 const N_VERSION: [u8; 4] = [0x02, 0x00, 0x00, 0x00];
@@ -53,6 +55,10 @@ impl SignedBatchTxn {
         bitcoin_transaction_feerate: u64,
         // Engine key
         engine_keyholder: &KeyHolder,
+        // Account+engine MuSig2 key-path cosignatures for each LiftV2 deposit,
+        // keyed by the deposit outpoint. The engine cannot produce these alone;
+        // they come from the interactive cosigning session with each depositor.
+        liftv2_keypath_sigs: &HashMap<OutPoint, [u8; 64]>,
     ) -> Result<SignedBatchTxn, SignedBatchTxnConstructError> {
         // Prev projectors are not supported for the time being
         {
@@ -216,9 +222,55 @@ impl SignedBatchTxn {
                                 tx_input_index_iterator += 1;
                             }
                             Lift::LiftV2(liftv2) => {
-                                return Err(SignedBatchTxnConstructError::LiftV2NotSupportedError(
+                                // LiftV2 is lifted in via a KEY-PATH spend of the
+                                // account+engine MuSig2 output. The engine cannot
+                                // sign this alone; it must be co-signed with the
+                                // depositor, so the aggregated signature is supplied
+                                // here (keyed by outpoint).
+                                let cosig = liftv2_keypath_sigs
+                                    .get(&liftv2.outpoint)
+                                    .copied()
+                                    .ok_or(SignedBatchTxnConstructError::LiftV2CosignMissingError(
+                                        liftv2.clone(),
+                                    ))?;
+
+                                // Key-path sighash for this input (no leaf).
+                                let liftv2_keypath_sighash: [u8; 32] = unsigned_batch_txn
+                                    .taproot_sighash(tx_input_index_iterator, None)
+                                    .ok_or(SignedBatchTxnConstructError::LiftV2TaprootSighashConstructionError(
+                                        liftv2.clone(),
+                                    ))?;
+
+                                // Verify the cosignature against the deposit output key
+                                // before trusting it in the batch.
+                                let output_key: [u8; 32] = return_liftv2_taproot(
+                                    liftv2.account_key,
+                                    liftv2.engine_key,
+                                )
+                                .and_then(|taproot| taproot.tweaked_key())
+                                .ok_or(SignedBatchTxnConstructError::LiftV2CosignInvalidError(
                                     liftv2.clone(),
-                                ));
+                                ))?
+                                .serialize_xonly();
+
+                                if !schnorr::verify_xonly(
+                                    output_key,
+                                    liftv2_keypath_sighash,
+                                    cosig,
+                                    SchnorrSigningMode::BIP340,
+                                ) {
+                                    return Err(
+                                        SignedBatchTxnConstructError::LiftV2CosignInvalidError(
+                                            liftv2.clone(),
+                                        ),
+                                    );
+                                }
+
+                                // Key-path witness is just the aggregated signature.
+                                let prev_liftv2_witness = vec![cosig.to_vec()];
+
+                                tx_input_witnesses.push(prev_liftv2_witness);
+                                tx_input_index_iterator += 1;
                             }
                             Lift::Unknown { .. } => {
                                 return Err(

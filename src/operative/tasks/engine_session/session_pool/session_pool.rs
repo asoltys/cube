@@ -368,6 +368,10 @@ impl SessionPool {
         let new_payload = Payload::new(self.engine_key, new_payload_bytes.clone(), None);
 
         // 16 Construct the signed batch transaction.
+        // LiftV2 key-path cosignatures: empty until the interactive cosigning
+        // session is wired in (the engine only includes V2 lifts once it can
+        // co-sign them with the depositor).
+        let liftv2_keypath_sigs = std::collections::HashMap::<bitcoin::OutPoint, [u8; 64]>::new();
         let signed_batch_txn = SignedBatchTxn::construct(
             prev_payload,
             prev_projectors,
@@ -376,6 +380,7 @@ impl SessionPool {
             new_projector,
             bitcoin_transaction_feerate,
             engine_keyholder,
+            &liftv2_keypath_sigs,
         )
         .map_err(|err| IntoBatchContainerError::SignedBatchTxnConstructError(err))?;
 
