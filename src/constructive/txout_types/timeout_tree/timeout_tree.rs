@@ -260,4 +260,24 @@ impl TimeoutTree {
     pub fn leaves_value_sum(&self) -> u64 {
         self.leaves.iter().map(|l| l.value_in_satoshis).sum()
     }
+
+    /// The UNROLL outputs: one VTXO leaf output per participant. The N-of-N
+    /// pre-signs (at covenant creation, all online) a transaction spending the
+    /// funding covenant into these. If a later cooperative refresh can't complete
+    /// (a participant is offline), anyone broadcasts that pre-signed unroll to
+    /// materialize every leaf on-chain — each holder then unilaterally CSV-exits
+    /// their own leaf. This is the offline-liveness fallback (no one need be online
+    /// to broadcast a transaction signed back when everyone was). Returns `None`
+    /// if any leaf scriptpubkey can't be built.
+    pub fn unroll_outputs(&self) -> Option<Vec<bitcoin::TxOut>> {
+        self.leaves
+            .iter()
+            .map(|leaf| {
+                leaf.scriptpubkey().map(|spk| bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(leaf.value_in_satoshis),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(spk),
+                })
+            })
+            .collect()
+    }
 }
