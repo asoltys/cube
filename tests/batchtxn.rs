@@ -200,9 +200,10 @@ mod batchtxn_test {
             vec![],
             vec![liftup_entry],
             new_payload,
-            None,
+            vec![],
             1,
             &engine_key_holder,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
         .expect("Failed to construct signed batch transaction.");

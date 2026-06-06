@@ -91,7 +91,7 @@ mod liftv2_engine_path {
             &[],
             &entries,
             &new_payload,
-            &None,
+            &[],
             1,
         )
         .expect("liftv2 sighashes");
@@ -130,10 +130,11 @@ mod liftv2_engine_path {
             vec![],
             entries,
             new_payload,
-            None,
+            vec![],
             1,
             &engine_kh,
             &cosigs,
+            &std::collections::HashMap::new(),
         )
         .expect("the exposed sighash must be exactly what construct verifies against");
 

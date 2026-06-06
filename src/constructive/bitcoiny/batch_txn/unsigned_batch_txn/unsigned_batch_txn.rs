@@ -42,8 +42,8 @@ impl UnsignedBatchTxn {
         lift_tx_inputs: Vec<(OutPoint, TxOut)>,
         // Payload output
         new_payload_txout: TxOut,
-        // Projector output
-        new_projector_txout: Option<TxOut>,
+        // Projector outputs (one per contract exit-tree funding output emitted this batch)
+        new_projector_txouts: Vec<TxOut>,
         // Swapout outputs
         swapout_tx_outputs: Vec<TxOut>,
         // Bitcoin transaction feerate (sats per vbyte)
@@ -115,10 +115,8 @@ impl UnsignedBatchTxn {
             let tx_inputs_count = tx_inputs.len() as u64;
 
             let tx_outputs_count = {
-                let mut n = 1u64; // change/payload output
-                if new_projector_txout.is_some() {
-                    n += 1;
-                }
+                let n = 1u64 // change/payload output
+                    + new_projector_txouts.len() as u64;
                 n + _swapout_tx_outputs.len() as u64
             };
 
@@ -158,7 +156,7 @@ impl UnsignedBatchTxn {
             change_val += tx_inputs_value_sum;
 
             // Add projector values to the change value.
-            if let Some(projector_txout) = &new_projector_txout {
+            for projector_txout in &new_projector_txouts {
                 change_val = change_val
                     .checked_sub(projector_txout.value.to_sat())
                     .ok_or(
@@ -190,8 +188,8 @@ impl UnsignedBatchTxn {
                 script_pubkey: new_payload_txout.script_pubkey,
             });
 
-            // Push the new projector output to the tx outputs.
-            if let Some(projector_txout) = new_projector_txout {
+            // Push the new projector outputs to the tx outputs.
+            for projector_txout in new_projector_txouts {
                 tx_outputs.push(projector_txout);
             }
 

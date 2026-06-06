@@ -50,7 +50,7 @@ impl SignedBatchTxn {
         entries: Vec<Entry>,
         // Tx outputs
         new_payload: Payload,
-        new_projector: Option<Projector>,
+        new_projectors: Vec<Projector>,
         // Tx feerate (sats per vbyte)
         bitcoin_transaction_feerate: u64,
         // Engine key
@@ -59,6 +59,10 @@ impl SignedBatchTxn {
         // keyed by the deposit outpoint. The engine cannot produce these alone;
         // they come from the interactive cosigning session with each depositor.
         liftv2_keypath_sigs: &HashMap<OutPoint, [u8; 64]>,
+        // N-of-N (all participants + engine) MuSig2 key-path cosignatures for each
+        // prev projector being refreshed (spent) into this batch, keyed by the
+        // projector outpoint. The consensus-enforced auto-refresh.
+        projector_refresh_keypath_sigs: &HashMap<OutPoint, [u8; 64]>,
     ) -> Result<SignedBatchTxn, SignedBatchTxnConstructError> {
         // Assemble the unsigned batch transaction (shared with the LiftV2
         // key-path sighash computation so the two never diverge).
@@ -67,7 +71,7 @@ impl SignedBatchTxn {
             &prev_projectors,
             &entries,
             &new_payload,
-            &new_projector,
+            &new_projectors,
             bitcoin_transaction_feerate,
         )?;
 
@@ -107,9 +111,59 @@ impl SignedBatchTxn {
             tx_input_index_iterator += 1;
         }
 
-        // Fill prev projectors witnesses
+        // Fill prev projectors witnesses (the auto-refresh): each prev projector is
+        // spent via a KEY-PATH spend of its value-bound N-of-N MuSig2 output. The
+        // engine cannot sign alone; the aggregated refresh signature is supplied
+        // here (keyed by projector outpoint), exactly like a LiftV2 cosign.
         {
-            // Not supported for the time being.
+            for projector in &prev_projectors {
+                let outpoint = projector
+                    .location
+                    .as_ref()
+                    .map(|(outpoint, _)| *outpoint)
+                    .ok_or(SignedBatchTxnConstructError::ProjectorLocationNotFoundError)?;
+
+                let cosig = projector_refresh_keypath_sigs
+                    .get(&outpoint)
+                    .copied()
+                    .ok_or(SignedBatchTxnConstructError::ProjectorRefreshCosignMissingError(
+                        outpoint,
+                    ))?;
+
+                // Key-path sighash for this input (no leaf).
+                let refresh_sighash: [u8; 32] = unsigned_batch_txn
+                    .taproot_sighash(tx_input_index_iterator, None)
+                    .ok_or(SignedBatchTxnConstructError::ProjectorRefreshSighashConstructionError(
+                        outpoint,
+                    ))?;
+
+                // The covenant output key is the P2TR output key in the projector
+                // scriptpubkey (OP_1 <32-byte key>). Verify the refresh cosig
+                // against it before trusting it in the batch.
+                let spk = &projector.scriptpubkey;
+                if spk.len() != 34 || spk[0] != 0x51 || spk[1] != 0x20 {
+                    return Err(SignedBatchTxnConstructError::ProjectorRefreshCosignInvalidError(
+                        outpoint,
+                    ));
+                }
+                let mut output_key = [0u8; 32];
+                output_key.copy_from_slice(&spk[2..34]);
+
+                if !schnorr::verify_xonly(
+                    output_key,
+                    refresh_sighash,
+                    cosig,
+                    SchnorrSigningMode::BIP340,
+                ) {
+                    return Err(SignedBatchTxnConstructError::ProjectorRefreshCosignInvalidError(
+                        outpoint,
+                    ));
+                }
+
+                // Key-path witness is just the aggregated refresh signature.
+                tx_input_witnesses.push(vec![cosig.to_vec()]);
+                tx_input_index_iterator += 1;
+            }
         }
 
         // Fill LiftV1 witnesses
@@ -234,13 +288,9 @@ impl SignedBatchTxn {
         prev_projectors: &[Projector],
         entries: &[Entry],
         new_payload: &Payload,
-        new_projector: &Option<Projector>,
+        new_projectors: &[Projector],
         bitcoin_transaction_feerate: u64,
     ) -> Result<UnsignedBatchTxn, SignedBatchTxnConstructError> {
-        if prev_projectors.len() != 0 {
-            return Err(SignedBatchTxnConstructError::PrevProjectorsNotSupportedError);
-        }
-
         let prev_payload_tx_input: (OutPoint, TxOut) = match prev_payload.location() {
             Some((outpoint, txout)) => (outpoint, txout),
             None => return Err(SignedBatchTxnConstructError::PayloadLocationNotFoundError),
@@ -298,17 +348,20 @@ impl SignedBatchTxn {
             script_pubkey: ScriptBuf::from(new_payload_scriptpubkey),
         };
 
-        let new_projector_txout = new_projector.clone().map(|projector| TxOut {
-            value: Amount::from_sat(projector.satoshi_amount),
-            script_pubkey: ScriptBuf::from(projector.scriptpubkey),
-        });
+        let new_projector_txouts: Vec<TxOut> = new_projectors
+            .iter()
+            .map(|projector| TxOut {
+                value: Amount::from_sat(projector.satoshi_amount),
+                script_pubkey: ScriptBuf::from(projector.scriptpubkey.clone()),
+            })
+            .collect();
 
         UnsignedBatchTxn::construct(
             prev_payload_tx_input,
             projector_tx_inputs,
             lift_tx_inputs,
             new_payload_txout,
-            new_projector_txout,
+            new_projector_txouts,
             swapout_tx_outputs,
             bitcoin_transaction_feerate,
         )
@@ -323,7 +376,7 @@ impl SignedBatchTxn {
         prev_projectors: &[Projector],
         entries: &[Entry],
         new_payload: &Payload,
-        new_projector: &Option<Projector>,
+        new_projectors: &[Projector],
         bitcoin_transaction_feerate: u64,
     ) -> Result<HashMap<OutPoint, [u8; 32]>, SignedBatchTxnConstructError> {
         let unsigned = Self::assemble_unsigned_batch_txn(
@@ -331,7 +384,7 @@ impl SignedBatchTxn {
             prev_projectors,
             entries,
             new_payload,
-            new_projector,
+            new_projectors,
             bitcoin_transaction_feerate,
         )?;
 
@@ -352,6 +405,44 @@ impl SignedBatchTxn {
                     index += 1;
                 }
             }
+        }
+        Ok(sighashes)
+    }
+
+    /// Computes the BIP341 KEY-PATH sighash for each prev projector being refreshed
+    /// (spent) in this batch, keyed by projector outpoint. These are the messages
+    /// the participants + engine N-of-N co-sign to authorize the auto-refresh.
+    /// Projector inputs occupy indices 1..1+prev_projectors.len() (right after the
+    /// prev payload), matching `assemble_unsigned_batch_txn`.
+    pub fn projector_refresh_keypath_sighashes(
+        prev_payload: &Payload,
+        prev_projectors: &[Projector],
+        entries: &[Entry],
+        new_payload: &Payload,
+        new_projectors: &[Projector],
+        bitcoin_transaction_feerate: u64,
+    ) -> Result<HashMap<OutPoint, [u8; 32]>, SignedBatchTxnConstructError> {
+        let unsigned = Self::assemble_unsigned_batch_txn(
+            prev_payload,
+            prev_projectors,
+            entries,
+            new_payload,
+            new_projectors,
+            bitcoin_transaction_feerate,
+        )?;
+
+        let mut sighashes = HashMap::new();
+        for (i, projector) in prev_projectors.iter().enumerate() {
+            let outpoint = projector
+                .location
+                .as_ref()
+                .map(|(outpoint, _)| *outpoint)
+                .ok_or(SignedBatchTxnConstructError::ProjectorLocationNotFoundError)?;
+            let index = 1 + i as u32; // prev_payload is input 0
+            let sighash = unsigned.taproot_sighash(index, None).ok_or(
+                SignedBatchTxnConstructError::ProjectorRefreshSighashConstructionError(outpoint),
+            )?;
+            sighashes.insert(outpoint, sighash);
         }
         Ok(sighashes)
     }

@@ -105,7 +105,7 @@ mod liftv2_batch_lift {
             vec![],
             vec![(lift.outpoint(), lift.txout())],
             new_payload_txout,
-            None,
+            vec![],
             vec![],
             1,
         )
@@ -141,10 +141,11 @@ mod liftv2_batch_lift {
             vec![],
             vec![Entry::Liftup(liftup)],
             new_payload,
-            None,
+            vec![],
             1,
             &engine_kh,
             &sigs,
+            &std::collections::HashMap::new(),
         )
         .expect("batch builder must accept the cosigned LiftV2 deposit");
 
@@ -177,10 +178,11 @@ mod liftv2_batch_lift {
             vec![],
             vec![Entry::Liftup(liftup2)],
             Payload::new(engine_key, vec![0xca, 0xfe], None),
-            None,
+            vec![],
             1,
             &engine_kh,
-            &HashMap::new(), // no cosig provided
+            &HashMap::new(), // no liftv2 cosig provided
+            &HashMap::new(), // no projector refresh cosig
         );
         assert!(bad.is_err(), "batch builder must reject a LiftV2 without a cosignature");
 

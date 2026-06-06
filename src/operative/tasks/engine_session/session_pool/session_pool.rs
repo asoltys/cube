@@ -143,6 +143,11 @@ pub struct SessionPool {
     // being lifted in this batch, keyed by deposit outpoint.
     pub liftv2_cosigs: std::collections::HashMap<bitcoin::OutPoint, [u8; 64]>,
 
+    // Collected N-of-N (participants + engine) refresh cosignatures for prev
+    // projectors being spent (auto-refreshed) into this batch, keyed by projector
+    // outpoint.
+    pub projector_refresh_cosigs: std::collections::HashMap<bitcoin::OutPoint, [u8; 64]>,
+
     // LiftV2 deposits awaiting cosign in this batch (depositor nonces committed
     // at registration; engine session begun at freeze), keyed by deposit outpoint.
     pub pending_liftv2: std::collections::HashMap<bitcoin::OutPoint, PendingLiftV2>,
@@ -233,6 +238,7 @@ impl SessionPool {
             added_entries: Vec::new(),
             added_individual_entry_bls_signatures: Vec::new(),
             liftv2_cosigs: std::collections::HashMap::new(),
+            projector_refresh_cosigs: std::collections::HashMap::new(),
             pending_liftv2: std::collections::HashMap::new(),
         };
 
@@ -262,6 +268,7 @@ impl SessionPool {
 
         // 4 Reset the collected LiftV2 cosignatures + pending cosign sessions.
         self.liftv2_cosigs = std::collections::HashMap::new();
+        self.projector_refresh_cosigs = std::collections::HashMap::new();
         self.pending_liftv2 = std::collections::HashMap::new();
 
         // 5 Reset the batch height.
@@ -328,7 +335,7 @@ impl SessionPool {
             Vec<Projector>,
             Vec<Entry>,
             Payload,
-            Option<Projector>,
+            Vec<Projector>,
             u64,
         ),
         IntoBatchContainerError,
@@ -406,7 +413,7 @@ impl SessionPool {
         //   per-participant unilaterally-exitable VTXOs. Emission is gated by
         //   EMIT_EXIT_TREE_PROJECTORS (off) until the cross-batch N-of-N refresh
         //   can spend these covenant outputs; the derivation runs every batch.
-        let new_projector: Option<Projector> = {
+        let new_projectors: Vec<Projector> = {
             let bitcoin_tip = {
                 let _sync_manager = self.sync_manager.lock().await;
                 _sync_manager.bitcoin_sync_height_tip()
@@ -430,31 +437,32 @@ impl SessionPool {
             }
 
             match EMIT_EXIT_TREE_PROJECTORS {
-                // Emit the first (sorted) contract's exit-tree funding output. The
-                // single-Projector batch slot represents one covenant output;
-                // multi-contract emission needs the Vec<Projector> output wiring.
-                true => exit_trees.first().and_then(|(_, tree)| {
-                    tree.funding_scriptpubkey().map(|spk| Projector {
-                        scriptpubkey: spk,
-                        satoshi_amount: tree.total_value_in_satoshis,
-                        location: None,
+                // Emit one Projector (exit-tree funding output) per allocated
+                // contract. Gated off until the cross-batch N-of-N refresh + the
+                // projector-state persistence land (else the funds would strand).
+                true => exit_trees
+                    .iter()
+                    .filter_map(|(_, tree)| {
+                        tree.funding_scriptpubkey().map(|spk| Projector {
+                            scriptpubkey: spk,
+                            satoshi_amount: tree.total_value_in_satoshis,
+                            location: None,
+                        })
                     })
-                }),
-                false => None,
+                    .collect(),
+                false => Vec::new(),
             }
         };
 
-        // 10 Insert a bit to the beginning of the payload bits to indicate the presence of the new projector.
-        match new_projector {
-            // 10.a The new projector is set.
-            Some(_) => {
-                // 10.a.1 Push true bit to indicate the presence of the projector.
-                payload_bits.push(true);
-            }
-            // 10.b The new projector is not set.
-            None => {
-                // 10.b.1 Push false bit to indicate the absence of the projector.
+        // 10 Insert a bit to the beginning of the payload bits to indicate the presence of new projectors.
+        match new_projectors.is_empty() {
+            // 10.a No new projectors.
+            true => {
                 payload_bits.push(false);
+            }
+            // 10.b New projectors present.
+            false => {
+                payload_bits.push(true);
             }
         }
 
@@ -495,7 +503,7 @@ impl SessionPool {
             prev_projectors,
             executed_entries,
             new_payload,
-            new_projector,
+            new_projectors,
             bitcoin_transaction_feerate,
         ))
     }
@@ -513,7 +521,7 @@ impl SessionPool {
             prev_projectors,
             executed_entries,
             new_payload,
-            new_projector,
+            new_projectors,
             feerate,
         ) = self.assemble_batch_args().await?;
 
@@ -522,10 +530,11 @@ impl SessionPool {
             prev_projectors,
             executed_entries,
             new_payload,
-            new_projector,
+            new_projectors,
             feerate,
             engine_keyholder,
             &self.liftv2_cosigs,
+            &self.projector_refresh_cosigs,
         )
         .map_err(IntoBatchContainerError::SignedBatchTxnConstructError)?;
 
@@ -543,7 +552,7 @@ impl SessionPool {
         &self,
     ) -> Result<std::collections::HashMap<bitcoin::OutPoint, [u8; 32]>, IntoBatchContainerError>
     {
-        let (_height, _bytes, prev_payload, prev_projectors, executed_entries, new_payload, new_projector, feerate) =
+        let (_height, _bytes, prev_payload, prev_projectors, executed_entries, new_payload, new_projectors, feerate) =
             self.assemble_batch_args().await?;
 
         SignedBatchTxn::liftv2_keypath_sighashes(
@@ -551,7 +560,7 @@ impl SessionPool {
             &prev_projectors,
             &executed_entries,
             &new_payload,
-            &new_projector,
+            &new_projectors,
             feerate,
         )
         .map_err(IntoBatchContainerError::SignedBatchTxnConstructError)
