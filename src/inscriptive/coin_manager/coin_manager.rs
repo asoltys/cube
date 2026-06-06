@@ -728,6 +728,16 @@ impl CoinManager {
         Some(satoshi_value as u64)
     }
 
+    /// Returns the ids of every registered contract (permanent + this execution's
+    /// delta), sorted for determinism.
+    pub fn get_all_contract_ids(&self) -> Vec<[u8; 32]> {
+        let mut ids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+        ids.extend(self.in_memory_contracts.keys().copied());
+        ids.extend(self.delta.new_contracts_to_register.keys().copied());
+        ids.extend(self.delta.updated_shadow_spaces.keys().copied());
+        ids.into_iter().collect()
+    }
+
     /// Returns every account's shadow allocation for a contract, in satoshis,
     /// resolving the delta (incl. deferred proportional change) and ephemeral
     /// deallocations exactly as [`get_shadow_alloc_value_in_satoshis`] does.

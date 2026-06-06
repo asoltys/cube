@@ -10,6 +10,7 @@ use crate::constructive::entry::entry_kinds::swapout::swapout::Swapout;
 use crate::constructive::txo::lift::lift_versions::liftv2::cosign::EngineCosigner;
 use crate::constructive::txout_types::payload::payload::Payload;
 use crate::constructive::txout_types::projector::projector::Projector;
+use crate::constructive::txout_types::timeout_tree::TimeoutTree;
 use crate::transmutative::hash::{Hash, HashTag};
 use crate::transmutative::secp::into::IntoScalar;
 use secp::{Point, Scalar};
@@ -62,6 +63,20 @@ const PAYLOAD_VERSION: u32 = 1;
 
 /// The maximum number of entries that can be in the pool.
 const MAX_IN_POOL_ENTRIES: usize = 1000;
+
+/// Relative-timelock (blocks) on a VTXO leaf's unilateral CSV exit path.
+const EXIT_TREE_EXIT_DELAY: u16 = 144;
+
+/// How far above the current Bitcoin tip a derived exit tree's CLTV server-expiry
+/// (engine reclaim of unrefreshed leaves) is set.
+const EXIT_TREE_EXPIRY_WINDOW: u64 = 12_960;
+
+/// Whether the engine EMITS the derived exit-tree funding outputs as on-chain
+/// Projector outputs in the batch. Kept OFF: emitting a covenant output that the
+/// cross-batch N-of-N refresh ("auto-refresh") cannot yet spend would strand its
+/// value. The trees are derived + logged every batch regardless; flipping this on
+/// is gated on the refresh leg landing.
+const EMIT_EXIT_TREE_PROJECTORS: bool = false;
 
 /// The state of the `SessionPool`.
 pub enum SessionPoolState {
@@ -384,9 +399,50 @@ impl SessionPool {
             payload_bits.extend(expired_projectors_count_bits);
         }
 
-        // 9 Retrieve the new projector.
-        // Not set for the time being.
-        let new_projector: Option<Projector> = None;
+        // 9 Derive the non-custodial exit trees from live shadow state, and (when
+        //   enabled) emit the funding output as the batch's new Projector.
+        //
+        //   This renders every contract's shadow-allocated pot as a TimeoutTree of
+        //   per-participant unilaterally-exitable VTXOs. Emission is gated by
+        //   EMIT_EXIT_TREE_PROJECTORS (off) until the cross-batch N-of-N refresh
+        //   can spend these covenant outputs; the derivation runs every batch.
+        let new_projector: Option<Projector> = {
+            let bitcoin_tip = {
+                let _sync_manager = self.sync_manager.lock().await;
+                _sync_manager.bitcoin_sync_height_tip()
+            };
+            let expiry_height = (bitcoin_tip + EXIT_TREE_EXPIRY_WINDOW) as u32;
+            let exit_trees = self
+                .derive_contract_exit_trees(expiry_height, EXIT_TREE_EXIT_DELAY)
+                .await;
+
+            if !exit_trees.is_empty() {
+                let total_vtxos: usize = exit_trees.iter().map(|(_, t)| t.leaves.len()).sum();
+                let total_covered: u64 =
+                    exit_trees.iter().map(|(_, t)| t.total_value_in_satoshis).sum();
+                println!(
+                    "Derived {} contract exit tree(s): {} VTXOs, {} sats covered (emit={}).",
+                    exit_trees.len(),
+                    total_vtxos,
+                    total_covered,
+                    EMIT_EXIT_TREE_PROJECTORS
+                );
+            }
+
+            match EMIT_EXIT_TREE_PROJECTORS {
+                // Emit the first (sorted) contract's exit-tree funding output. The
+                // single-Projector batch slot represents one covenant output;
+                // multi-contract emission needs the Vec<Projector> output wiring.
+                true => exit_trees.first().and_then(|(_, tree)| {
+                    tree.funding_scriptpubkey().map(|spk| Projector {
+                        scriptpubkey: spk,
+                        satoshi_amount: tree.total_value_in_satoshis,
+                        location: None,
+                    })
+                }),
+                false => None,
+            }
+        };
 
         // 10 Insert a bit to the beginning of the payload bits to indicate the presence of the new projector.
         match new_projector {
@@ -614,6 +670,39 @@ impl SessionPool {
         let engine = pending.engine.as_ref()?;
         let (eh, eb) = engine.engine_public_nonces();
         Some((sighash, eh, eb))
+    }
+
+    /// Derives, from live shadow state, the non-custodial exit tree for every
+    /// contract that has shadow allocations: a [`TimeoutTree`] rendering the
+    /// contract's pot as per-participant, unilaterally-exitable VTXOs (Projector
+    /// value-bound key path + CSV exit + CLTV engine-expiry). `expiry_height` is
+    /// the CLTV reclaim height; `exit_delay` the CSV exit delay. Returns
+    /// `(contract_id, tree)` sorted by contract id.
+    pub async fn derive_contract_exit_trees(
+        &self,
+        expiry_height: u32,
+        exit_delay: u16,
+    ) -> Vec<([u8; 32], TimeoutTree)> {
+        let coin_manager = self.coin_manager.lock().await;
+        let mut trees = Vec::new();
+        for contract_id in coin_manager.get_all_contract_ids() {
+            let allocations = match coin_manager
+                .get_contract_shadow_allocations_in_satoshis(contract_id)
+            {
+                Some(a) if !a.is_empty() => a,
+                _ => continue,
+            };
+            if let Some(tree) = TimeoutTree::build(
+                self.engine_key,
+                &allocations,
+                expiry_height,
+                exit_delay,
+                None,
+            ) {
+                trees.push((contract_id, tree));
+            }
+        }
+        trees
     }
 
     /// Executes a `Liftup` entry in the `SessionPool`.
