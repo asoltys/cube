@@ -133,6 +133,24 @@ pub async fn handle_package(
                     )
                     .await
                 }
+                PackageKind::LiftupV2RegisterProtocol => {
+                    let session_pool = Arc::clone(session_pool);
+                    crate::communicative::tcp::protocol::liftup_v2::server::handle_liftup_v2_register_request(
+                        package.timestamp(),
+                        &package.payload(),
+                        &session_pool,
+                    )
+                    .await
+                }
+                PackageKind::LiftupV2CosignProtocol => {
+                    let session_pool = Arc::clone(session_pool);
+                    crate::communicative::tcp::protocol::liftup_v2::server::handle_liftup_v2_cosign_request(
+                        package.timestamp(),
+                        &package.payload(),
+                        &session_pool,
+                    )
+                    .await
+                }
                 PackageKind::MoveProtocol => {
                     let session_pool = Arc::clone(session_pool);
                     crate::communicative::tcp::protocol::r#move::server::handle_move_request(

@@ -20,6 +20,11 @@ pub use crate::communicative::tcp::protocol::liftup_v1::{
     ExecLiftupInPoolError, LiftupV1RequestBody, LiftupV1ResponseBody, LiftupV1ResponseError,
     LiftupV1SuccessBody,
 };
+pub use crate::communicative::tcp::protocol::liftup_v2::{
+    LiftupV2CosignRequestBody, LiftupV2CosignResponseBody, LiftupV2CosignResponseError,
+    LiftupV2Nonce, LiftupV2RegisterRequestBody, LiftupV2RegisterResponseBody,
+    LiftupV2RegisterResponseError, LiftupV2RegisterSuccessBody,
+};
 pub use crate::communicative::tcp::protocol::r#move::{
     ExecMoveInPoolError, MoveRequestBody, MoveResponseBody, MoveResponseError, MoveSuccessBody,
 };

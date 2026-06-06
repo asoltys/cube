@@ -6,6 +6,9 @@ use crate::communicative::tcp::protocol::call::CallResponseBody;
 use crate::communicative::tcp::protocol::deploy::DeployResponseBody;
 use crate::communicative::tcp::protocol::in_flight_sync::InFlightSyncResponseBody;
 use crate::communicative::tcp::protocol::liftup_v1::LiftupV1ResponseBody;
+use crate::communicative::tcp::protocol::liftup_v2::{
+    LiftupV2CosignResponseBody, LiftupV2Nonce, LiftupV2RegisterResponseBody,
+};
 use crate::communicative::tcp::protocol::r#move::MoveResponseBody;
 use crate::communicative::tcp::protocol::swapout::SwapoutResponseBody;
 use crate::communicative::tcp::request_error::RequestError;
@@ -27,6 +30,21 @@ pub trait TCPClient {
         liftup: &Liftup,
         liftup_bls_signature: [u8; 96],
     ) -> Result<(LiftupV1ResponseBody, Duration), RequestError>;
+    async fn request_liftup_v2_register(
+        &self,
+        liftup: &Liftup,
+        liftup_bls_signature: [u8; 96],
+        nonces: Vec<LiftupV2Nonce>,
+    ) -> Result<(LiftupV2RegisterResponseBody, Duration), RequestError>;
+    async fn request_liftup_v2_cosign_fetch(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<(LiftupV2CosignResponseBody, Duration), RequestError>;
+    async fn request_liftup_v2_cosign_submit(
+        &self,
+        outpoint: OutPoint,
+        client_partial_sig: [u8; 32],
+    ) -> Result<(LiftupV2CosignResponseBody, Duration), RequestError>;
     async fn request_move(
         &self,
         move_entry: &Move,

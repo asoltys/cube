@@ -5,6 +5,7 @@ pub mod batchcontainer;
 pub mod batchcontainer_by_prevoutpoint;
 pub mod in_flight_sync;
 pub mod liftup_v1;
+pub mod liftup_v2;
 pub mod r#move;
 pub mod ping;
 pub mod config;

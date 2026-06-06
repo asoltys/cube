@@ -21,6 +21,14 @@ use std::sync::Arc;
 /// The waiting window period in seconds.
 const WAITING_WINDOW_PERIOD_SECONDS: u64 = 60;
 
+/// How long, after the batch freezes, the engine waits for LiftV2 depositors to
+/// submit their MuSig2 key-path partial signatures before giving up on the
+/// uncosigned deposits.
+const LIFTV2_COSIGN_TIMEOUT_SECONDS: u64 = 30;
+
+/// Poll interval while waiting for LiftV2 cosignatures to arrive.
+const LIFTV2_COSIGN_POLL_MS: u64 = 250;
+
 pub async fn engine_batch_builder_background_task(
     session_pool: &SESSION_POOL,
     sync_manager: &SYNC_MANAGER,
@@ -105,6 +113,78 @@ pub async fn engine_batch_builder_background_task(
         {
             let mut _session_pool = session_pool.lock().await;
             _session_pool.take_a_break_session();
+        }
+
+        // 7.5 Collect LiftV2 key-path cosignatures (the trustless deposit Lift Path).
+        //
+        // The batch is now frozen, so each pending LiftV2 deposit has a stable
+        // key-path sighash. We prepare the engine's half of every MuSig2 cosign,
+        // then wait for depositors to fetch that material and submit their partial
+        // signatures over the LiftupV2Cosign transport. A LiftV2 input cannot be
+        // spent into the batch without this account+engine key-path signature, so
+        // if a depositor never completes its cosign we abort the batch (its deposit
+        // simply retries next session) rather than build a batch with a missing
+        // witness.
+        {
+            // 7.5.1 Is there any LiftV2 deposit awaiting cosign this batch?
+            let has_pending_liftv2 = {
+                let _session_pool = session_pool.lock().await;
+                !_session_pool.pending_liftv2.is_empty()
+            };
+
+            if has_pending_liftv2 {
+                // 7.5.2 Engine partial-signs each pending deposit (deterministic
+                // nonces from the engine secret + the frozen sighash).
+                let prepare_result = {
+                    let mut _session_pool = session_pool.lock().await;
+                    _session_pool
+                        .prepare_liftv2_cosigns(engine_keyholder.secp_secret_key_bytes())
+                        .await
+                };
+
+                if let Err(error) = prepare_result {
+                    eprintln!(
+                        "Failed to prepare LiftV2 cosigns: {:?} at batch height #{}. Ending session.",
+                        error, current_execution_batch_height
+                    );
+                    let mut _session_pool = session_pool.lock().await;
+                    _session_pool.end_session().await;
+                    continue;
+                }
+
+                // 7.5.3 Wait for depositors to submit their partial signatures.
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(LIFTV2_COSIGN_TIMEOUT_SECONDS);
+                loop {
+                    let all_cosigned = {
+                        let _session_pool = session_pool.lock().await;
+                        _session_pool.all_liftv2_cosigned()
+                    };
+                    if all_cosigned {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        eprintln!(
+                            "LiftV2 cosign window timed out at batch height #{}; aborting batch (uncosigned deposits retry next session).",
+                            current_execution_batch_height
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(LIFTV2_COSIGN_POLL_MS))
+                        .await;
+                }
+
+                // 7.5.4 If any deposit is still uncosigned, abort this batch.
+                let fully_cosigned = {
+                    let _session_pool = session_pool.lock().await;
+                    _session_pool.all_liftv2_cosigned()
+                };
+                if !fully_cosigned {
+                    let mut _session_pool = session_pool.lock().await;
+                    _session_pool.end_session().await;
+                    continue;
+                }
+            }
         }
 
         // 8 Get the number of entries in the session pool.

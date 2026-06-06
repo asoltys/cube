@@ -15,6 +15,12 @@ use crate::communicative::tcp::protocol::in_flight_sync::client::request_in_flig
 use crate::communicative::tcp::protocol::in_flight_sync::InFlightSyncResponseBody;
 use crate::communicative::tcp::protocol::liftup_v1::client::request_liftup_v1;
 use crate::communicative::tcp::protocol::liftup_v1::LiftupV1ResponseBody;
+use crate::communicative::tcp::protocol::liftup_v2::client::{
+    request_liftup_v2_cosign_fetch, request_liftup_v2_cosign_submit, request_liftup_v2_register,
+};
+use crate::communicative::tcp::protocol::liftup_v2::{
+    LiftupV2CosignResponseBody, LiftupV2Nonce, LiftupV2RegisterResponseBody,
+};
 use crate::communicative::tcp::protocol::r#move::client::request_move;
 use crate::communicative::tcp::protocol::r#move::MoveResponseBody;
 use crate::communicative::tcp::protocol::swapout::client::request_swapout;
@@ -44,6 +50,30 @@ impl TCPClient for PEER {
         liftup_bls_signature: [u8; 96],
     ) -> Result<(LiftupV1ResponseBody, Duration), RequestError> {
         request_liftup_v1(self, liftup, liftup_bls_signature).await
+    }
+
+    async fn request_liftup_v2_register(
+        &self,
+        liftup: &Liftup,
+        liftup_bls_signature: [u8; 96],
+        nonces: Vec<LiftupV2Nonce>,
+    ) -> Result<(LiftupV2RegisterResponseBody, Duration), RequestError> {
+        request_liftup_v2_register(self, liftup, liftup_bls_signature, nonces).await
+    }
+
+    async fn request_liftup_v2_cosign_fetch(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<(LiftupV2CosignResponseBody, Duration), RequestError> {
+        request_liftup_v2_cosign_fetch(self, outpoint).await
+    }
+
+    async fn request_liftup_v2_cosign_submit(
+        &self,
+        outpoint: OutPoint,
+        client_partial_sig: [u8; 32],
+    ) -> Result<(LiftupV2CosignResponseBody, Duration), RequestError> {
+        request_liftup_v2_cosign_submit(self, outpoint, client_partial_sig).await
     }
 
     async fn request_move(

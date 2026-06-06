@@ -45,8 +45,11 @@ use colored::Colorize;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Whether MuSig2-based interactive lifts are enabled. Set to false for now since it's not supported yet.
-const V2_LIFT_ENABLED: bool = false;
+/// Whether MuSig2-based interactive (trustless) LiftV2 deposits are enabled.
+/// The full two-round cosign transport (register + nonce commit, then fetch
+/// engine material + submit partial sig) and the engine-loop cosign collection
+/// are now wired, so the node can discover and trustlessly lift V2 deposits.
+const V2_LIFT_ENABLED: bool = true;
 
 #[tokio::main]
 pub async fn run(

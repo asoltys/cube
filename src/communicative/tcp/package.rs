@@ -15,6 +15,8 @@ pub enum PackageKind {
     BatchContainerByPrevOutpointProtocol,
     DeployProtocol,
     CallProtocol,
+    LiftupV2RegisterProtocol,
+    LiftupV2CosignProtocol,
 }
 
 impl PackageKind {
@@ -31,6 +33,8 @@ impl PackageKind {
             PackageKind::ConfigProtocol => 0x08,
             PackageKind::DeployProtocol => 0x09,
             PackageKind::CallProtocol => 0x0a,
+            PackageKind::LiftupV2RegisterProtocol => 0x0b,
+            PackageKind::LiftupV2CosignProtocol => 0x0c,
         }
     }
     pub fn from_bytecode(bytecode: u8) -> Option<Self> {
@@ -46,6 +50,8 @@ impl PackageKind {
             0x08 => Some(PackageKind::ConfigProtocol),
             0x09 => Some(PackageKind::DeployProtocol),
             0x0a => Some(PackageKind::CallProtocol),
+            0x0b => Some(PackageKind::LiftupV2RegisterProtocol),
+            0x0c => Some(PackageKind::LiftupV2CosignProtocol),
             _ => None,
         }
     }

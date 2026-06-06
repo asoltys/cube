@@ -601,6 +601,21 @@ impl SessionPool {
         self.pending_liftv2.is_empty()
     }
 
+    /// Round 2 (fetch): the engine cosign material a depositor needs to compute
+    /// its partial signature for `outpoint` — `(keypath_sighash, engine_hiding,
+    /// engine_binding)`. Returns `None` until `prepare_liftv2_cosigns` has run for
+    /// this batch (i.e. before the batch freezes) or if the outpoint is unknown.
+    pub fn liftv2_cosign_material(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+    ) -> Option<([u8; 32], Point, Point)> {
+        let pending = self.pending_liftv2.get(outpoint)?;
+        let sighash = pending.keypath_sighash?;
+        let engine = pending.engine.as_ref()?;
+        let (eh, eb) = engine.engine_public_nonces();
+        Some((sighash, eh, eb))
+    }
+
     /// Executes a `Liftup` entry in the `SessionPool`.
     pub async fn exec_liftup_in_pool(
         &mut self,
