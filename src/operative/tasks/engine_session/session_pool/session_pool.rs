@@ -119,6 +119,10 @@ pub struct SessionPool {
 
     // The individual `Entry` BLS signatures that have been added.
     pub added_individual_entry_bls_signatures: Vec<[u8; 96]>,
+
+    // Collected account+engine MuSig2 key-path cosignatures for LiftV2 deposits
+    // being lifted in this batch, keyed by deposit outpoint.
+    pub liftv2_cosigs: std::collections::HashMap<bitcoin::OutPoint, [u8; 64]>,
 }
 
 /// Guarded `SessionPool`.
@@ -172,6 +176,7 @@ impl SessionPool {
             exec_ctx,
             added_entries: Vec::new(),
             added_individual_entry_bls_signatures: Vec::new(),
+            liftv2_cosigs: std::collections::HashMap::new(),
         };
 
         // 3 Guard the session pool.
@@ -198,7 +203,10 @@ impl SessionPool {
         // 3 Reset the added individual entry BLS signatures.
         self.added_individual_entry_bls_signatures = Vec::new();
 
-        // 4 Reset the batch height.
+        // 4 Reset the collected LiftV2 cosignatures.
+        self.liftv2_cosigs = std::collections::HashMap::new();
+
+        // 5 Reset the batch height.
         self.batch_info = None;
     }
 
@@ -249,10 +257,24 @@ impl SessionPool {
     }
 
     /// Converts the `ExecCtx` into a `BatchContainer`.
-    pub async fn into_batch_container(
-        &mut self,
-        engine_keyholder: &KeyHolder,
-    ) -> Result<BatchContainer, IntoBatchContainerError> {
+    /// Assembles the batch's payloads/entries/projectors/height/feerate. Shared
+    /// by `into_batch_container` and `liftv2_keypath_sighashes` so the inputs
+    /// (and thus the LiftV2 key-path sighashes) never diverge.
+    async fn assemble_batch_args(
+        &self,
+    ) -> Result<
+        (
+            u64,
+            Bytes,
+            Payload,
+            Vec<Projector>,
+            Vec<Entry>,
+            Payload,
+            Option<Projector>,
+            u64,
+        ),
+        IntoBatchContainerError,
+    > {
         // 1 Get the batch info.
         let (batch_height, batch_timestamp, bitcoin_transaction_feerate) = self
             .batch_info
@@ -367,29 +389,79 @@ impl SessionPool {
         // 15 Construct the new payload.
         let new_payload = Payload::new(self.engine_key, new_payload_bytes.clone(), None);
 
-        // 16 Construct the signed batch transaction.
-        // LiftV2 key-path cosignatures: empty until the interactive cosigning
-        // session is wired in (the engine only includes V2 lifts once it can
-        // co-sign them with the depositor).
-        let liftv2_keypath_sigs = std::collections::HashMap::<bitcoin::OutPoint, [u8; 64]>::new();
-        let signed_batch_txn = SignedBatchTxn::construct(
+        Ok((
+            batch_height,
+            new_payload_bytes,
             prev_payload,
             prev_projectors,
             executed_entries,
             new_payload,
             new_projector,
             bitcoin_transaction_feerate,
+        ))
+    }
+
+    /// Builds the signed batch container, lifting in any LiftV2 deposits using
+    /// the account+engine cosignatures collected in `self.liftv2_cosigs`.
+    pub async fn into_batch_container(
+        &mut self,
+        engine_keyholder: &KeyHolder,
+    ) -> Result<BatchContainer, IntoBatchContainerError> {
+        let (
+            batch_height,
+            new_payload_bytes,
+            prev_payload,
+            prev_projectors,
+            executed_entries,
+            new_payload,
+            new_projector,
+            feerate,
+        ) = self.assemble_batch_args().await?;
+
+        let signed_batch_txn = SignedBatchTxn::construct(
+            prev_payload,
+            prev_projectors,
+            executed_entries,
+            new_payload,
+            new_projector,
+            feerate,
             engine_keyholder,
-            &liftv2_keypath_sigs,
+            &self.liftv2_cosigs,
         )
-        .map_err(|err| IntoBatchContainerError::SignedBatchTxnConstructError(err))?;
+        .map_err(IntoBatchContainerError::SignedBatchTxnConstructError)?;
 
-        // 17 Construct the batch container.
-        let batch_container =
-            BatchContainer::new(batch_height, new_payload_bytes, signed_batch_txn);
+        Ok(BatchContainer::new(
+            batch_height,
+            new_payload_bytes,
+            signed_batch_txn,
+        ))
+    }
 
-        // 18 Return the batch container.
-        Ok(batch_container)
+    /// The BIP341 key-path sighash for each LiftV2 deposit in the (frozen) batch,
+    /// keyed by outpoint — the messages the depositor + engine co-sign (MuSig2)
+    /// to authorize lifting each deposit in.
+    pub async fn liftv2_keypath_sighashes(
+        &self,
+    ) -> Result<std::collections::HashMap<bitcoin::OutPoint, [u8; 32]>, IntoBatchContainerError>
+    {
+        let (_height, _bytes, prev_payload, prev_projectors, executed_entries, new_payload, new_projector, feerate) =
+            self.assemble_batch_args().await?;
+
+        SignedBatchTxn::liftv2_keypath_sighashes(
+            &prev_payload,
+            &prev_projectors,
+            &executed_entries,
+            &new_payload,
+            &new_projector,
+            feerate,
+        )
+        .map_err(IntoBatchContainerError::SignedBatchTxnConstructError)
+    }
+
+    /// Records a collected account+engine cosignature for a LiftV2 deposit, to be
+    /// used as its key-path witness when the batch is built.
+    pub fn insert_liftv2_cosig(&mut self, outpoint: bitcoin::OutPoint, cosig: [u8; 64]) {
+        self.liftv2_cosigs.insert(outpoint, cosig);
     }
 
     /// Executes a `Liftup` entry in the `SessionPool`.

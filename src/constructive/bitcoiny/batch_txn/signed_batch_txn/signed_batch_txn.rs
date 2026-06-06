@@ -60,86 +60,16 @@ impl SignedBatchTxn {
         // they come from the interactive cosigning session with each depositor.
         liftv2_keypath_sigs: &HashMap<OutPoint, [u8; 64]>,
     ) -> Result<SignedBatchTxn, SignedBatchTxnConstructError> {
-        // Prev projectors are not supported for the time being
-        {
-            if prev_projectors.len() != 0 {
-                return Err(SignedBatchTxnConstructError::PrevProjectorsNotSupportedError);
-            }
-        };
-
-        let prev_payload_tx_input: (OutPoint, TxOut) = match prev_payload.location() {
-            Some((outpoint, txout)) => (outpoint, txout),
-            None => return Err(SignedBatchTxnConstructError::PayloadLocationNotFoundError),
-        };
-
-        let projector_tx_inputs: Vec<(OutPoint, TxOut)> = prev_projectors
-            .iter()
-            .map(|projector| {
-                projector
-                    .location
-                    .as_ref()
-                    .map(|(outpoint, txout)| (outpoint.clone(), txout.clone()))
-                    .ok_or(SignedBatchTxnConstructError::ProjectorLocationNotFoundError)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let lift_tx_inputs: Vec<(OutPoint, TxOut)> = {
-            let mut lift_tx_inputs = Vec::new();
-            for entry in &entries {
-                if let Entry::Liftup(liftup) = entry {
-                    for lift in &liftup.lift_tx_inputs {
-                        lift_tx_inputs.push((lift.outpoint(), lift.txout()));
-                    }
-                }
-            }
-            lift_tx_inputs
-        };
-        let swapout_tx_outputs: Vec<TxOut> = {
-            let mut swapout_tx_outputs = Vec::new();
-            for entry in &entries {
-                if let Entry::Swapout(swapout) = entry {
-                    let scriptpubkey = swapout
-                        .pinless_self
-                        .calculated_scriptpubkey()
-                        .ok_or(
-                            SignedBatchTxnConstructError::SwapoutPinlessSelfCalculatedScriptpubkeyError,
-                        )?;
-                    let txout = TxOut {
-                        value: Amount::from_sat(u64::from(swapout.amount)),
-                        script_pubkey: ScriptBuf::from(scriptpubkey),
-                    };
-                    swapout_tx_outputs.push(txout);
-                }
-            }
-            swapout_tx_outputs
-        };
-
-        let new_payload_scriptpubkey = new_payload.calculated_scriptpubkey().ok_or(
-            SignedBatchTxnConstructError::UnsignedBatchTxnConstructError(
-                UnsignedBatchTxnConstructError::NewPayloadScriptpubkeyError,
-            ),
-        )?;
-
-        let new_payload_txout = TxOut {
-            value: Amount::from_sat(0),
-            script_pubkey: ScriptBuf::from(new_payload_scriptpubkey),
-        };
-
-        let new_projector_txout = new_projector.map(|projector| TxOut {
-            value: Amount::from_sat(projector.satoshi_amount),
-            script_pubkey: ScriptBuf::from(projector.scriptpubkey),
-        });
-
-        let unsigned_batch_txn = UnsignedBatchTxn::construct(
-            prev_payload_tx_input,
-            projector_tx_inputs,
-            lift_tx_inputs,
-            new_payload_txout,
-            new_projector_txout,
-            swapout_tx_outputs,
+        // Assemble the unsigned batch transaction (shared with the LiftV2
+        // key-path sighash computation so the two never diverge).
+        let unsigned_batch_txn = Self::assemble_unsigned_batch_txn(
+            &prev_payload,
+            &prev_projectors,
+            &entries,
+            &new_payload,
+            &new_projector,
             bitcoin_transaction_feerate,
-        )
-        .map_err(SignedBatchTxnConstructError::UnsignedBatchTxnConstructError)?;
+        )?;
 
         // Initialize the tx input witnesses.
         let mut tx_input_witnesses = Vec::<Witness>::new();
@@ -294,6 +224,136 @@ impl SignedBatchTxn {
             tx_inputs,
             tx_outputs: unsigned_batch_txn.tx_outputs,
         })
+    }
+
+    /// Assembles the unsigned batch transaction from the batch inputs/outputs.
+    /// Shared by `construct` and `liftv2_keypath_sighashes` so the inputs (and
+    /// thus the sighashes) are identical.
+    fn assemble_unsigned_batch_txn(
+        prev_payload: &Payload,
+        prev_projectors: &[Projector],
+        entries: &[Entry],
+        new_payload: &Payload,
+        new_projector: &Option<Projector>,
+        bitcoin_transaction_feerate: u64,
+    ) -> Result<UnsignedBatchTxn, SignedBatchTxnConstructError> {
+        if prev_projectors.len() != 0 {
+            return Err(SignedBatchTxnConstructError::PrevProjectorsNotSupportedError);
+        }
+
+        let prev_payload_tx_input: (OutPoint, TxOut) = match prev_payload.location() {
+            Some((outpoint, txout)) => (outpoint, txout),
+            None => return Err(SignedBatchTxnConstructError::PayloadLocationNotFoundError),
+        };
+
+        let projector_tx_inputs: Vec<(OutPoint, TxOut)> = prev_projectors
+            .iter()
+            .map(|projector| {
+                projector
+                    .location
+                    .as_ref()
+                    .map(|(outpoint, txout)| (outpoint.clone(), txout.clone()))
+                    .ok_or(SignedBatchTxnConstructError::ProjectorLocationNotFoundError)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let lift_tx_inputs: Vec<(OutPoint, TxOut)> = {
+            let mut lift_tx_inputs = Vec::new();
+            for entry in entries {
+                if let Entry::Liftup(liftup) = entry {
+                    for lift in &liftup.lift_tx_inputs {
+                        lift_tx_inputs.push((lift.outpoint(), lift.txout()));
+                    }
+                }
+            }
+            lift_tx_inputs
+        };
+
+        let swapout_tx_outputs: Vec<TxOut> = {
+            let mut swapout_tx_outputs = Vec::new();
+            for entry in entries {
+                if let Entry::Swapout(swapout) = entry {
+                    let scriptpubkey = swapout
+                        .pinless_self
+                        .calculated_scriptpubkey()
+                        .ok_or(
+                            SignedBatchTxnConstructError::SwapoutPinlessSelfCalculatedScriptpubkeyError,
+                        )?;
+                    swapout_tx_outputs.push(TxOut {
+                        value: Amount::from_sat(u64::from(swapout.amount)),
+                        script_pubkey: ScriptBuf::from(scriptpubkey),
+                    });
+                }
+            }
+            swapout_tx_outputs
+        };
+
+        let new_payload_scriptpubkey = new_payload.calculated_scriptpubkey().ok_or(
+            SignedBatchTxnConstructError::UnsignedBatchTxnConstructError(
+                UnsignedBatchTxnConstructError::NewPayloadScriptpubkeyError,
+            ),
+        )?;
+        let new_payload_txout = TxOut {
+            value: Amount::from_sat(0),
+            script_pubkey: ScriptBuf::from(new_payload_scriptpubkey),
+        };
+
+        let new_projector_txout = new_projector.clone().map(|projector| TxOut {
+            value: Amount::from_sat(projector.satoshi_amount),
+            script_pubkey: ScriptBuf::from(projector.scriptpubkey),
+        });
+
+        UnsignedBatchTxn::construct(
+            prev_payload_tx_input,
+            projector_tx_inputs,
+            lift_tx_inputs,
+            new_payload_txout,
+            new_projector_txout,
+            swapout_tx_outputs,
+            bitcoin_transaction_feerate,
+        )
+        .map_err(SignedBatchTxnConstructError::UnsignedBatchTxnConstructError)
+    }
+
+    /// Computes the BIP341 key-path sighash for each LiftV2 deposit spent in this
+    /// batch, keyed by deposit outpoint. These are the messages the depositor and
+    /// the engine co-sign (MuSig2) to authorize lifting each deposit in.
+    pub fn liftv2_keypath_sighashes(
+        prev_payload: &Payload,
+        prev_projectors: &[Projector],
+        entries: &[Entry],
+        new_payload: &Payload,
+        new_projector: &Option<Projector>,
+        bitcoin_transaction_feerate: u64,
+    ) -> Result<HashMap<OutPoint, [u8; 32]>, SignedBatchTxnConstructError> {
+        let unsigned = Self::assemble_unsigned_batch_txn(
+            prev_payload,
+            prev_projectors,
+            entries,
+            new_payload,
+            new_projector,
+            bitcoin_transaction_feerate,
+        )?;
+
+        // Input order matches assemble: prev_payload(0), projectors, then lifts.
+        let mut index: u32 = 1 + prev_projectors.len() as u32;
+        let mut sighashes = HashMap::new();
+        for entry in entries {
+            if let Entry::Liftup(liftup) = entry {
+                for lift in &liftup.lift_tx_inputs {
+                    if let Lift::LiftV2(liftv2) = lift {
+                        let sighash = unsigned.taproot_sighash(index, None).ok_or(
+                            SignedBatchTxnConstructError::LiftV2TaprootSighashConstructionError(
+                                liftv2.clone(),
+                            ),
+                        )?;
+                        sighashes.insert(liftv2.outpoint, sighash);
+                    }
+                    index += 1;
+                }
+            }
+        }
+        Ok(sighashes)
     }
 
     /// Returns the transaction input outpoints.
