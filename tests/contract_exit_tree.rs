@@ -69,17 +69,23 @@ mod contract_exit_tree {
             c.apply_changes().expect("ap2");
         }
 
-        // Read the attributed claims back out (this is what the engine would feed
-        // the tree builder).
+        // The engine enumerates the contract's claims directly from coin-manager
+        // state (sorted, satoshi-resolved) — exactly what it feeds the tree builder.
         let allocations: Vec<([u8; 32], u64)> = {
             let c = cm.lock().await;
-            vec![
-                (alice, c.get_shadow_alloc_value_in_satoshis(cid, alice).unwrap()),
-                (bob, c.get_shadow_alloc_value_in_satoshis(cid, bob).unwrap()),
-            ]
+            c.get_contract_shadow_allocations_in_satoshis(cid).unwrap()
         };
+        assert_eq!(allocations.len(), 2, "both staking accounts enumerated");
+        let enumerated_sum: u64 = allocations.iter().map(|(_, v)| *v).sum();
+        assert_eq!(enumerated_sum, pot, "enumerated claims sum to the pot");
         let contract_pot = cm.lock().await.get_contract_balance(cid).unwrap();
         assert_eq!(contract_pot, pot);
+        // unregistered contract -> None.
+        assert!(cm
+            .lock()
+            .await
+            .get_contract_shadow_allocations_in_satoshis([0xeeu8; 32])
+            .is_none());
 
         // ---- Build the timeout tree from the shadow claims. ----
         let tree = TimeoutTree::build(engine, &allocations, expiry_height, exit_delay, None)

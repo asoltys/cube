@@ -728,6 +728,48 @@ impl CoinManager {
         Some(satoshi_value as u64)
     }
 
+    /// Returns every account's shadow allocation for a contract, in satoshis,
+    /// resolving the delta (incl. deferred proportional change) and ephemeral
+    /// deallocations exactly as [`get_shadow_alloc_value_in_satoshis`] does.
+    /// Zero-valued allocations are omitted; the result is sorted by account key
+    /// for determinism (so the engine builds a stable timeout tree). Returns
+    /// `None` if the contract is not registered anywhere.
+    pub fn get_contract_shadow_allocations_in_satoshis(
+        &self,
+        contract_id: [u8; 32],
+    ) -> Option<Vec<([u8; 32], u64)>> {
+        // 1 Gather candidate account keys from both the delta and the permanent state.
+        let mut account_keys: std::collections::BTreeSet<[u8; 32]> =
+            std::collections::BTreeSet::new();
+        let mut found_contract = false;
+        if let Some(shadow_space) = self.delta.updated_shadow_spaces.get(&contract_id) {
+            found_contract = true;
+            account_keys.extend(shadow_space.allocs.keys().copied());
+        }
+        if let Some(body) = self.in_memory_contracts.get(&contract_id) {
+            found_contract = true;
+            account_keys.extend(body.shadow_space.allocs.keys().copied());
+        }
+        if !found_contract {
+            return None;
+        }
+
+        // 2 Resolve each candidate to its effective satoshi value, dropping
+        //   deallocated/zero allocations.
+        let mut allocations: Vec<([u8; 32], u64)> = Vec::new();
+        for account_key in account_keys.into_iter() {
+            if let Some(value) =
+                self.get_shadow_alloc_value_in_satoshis(contract_id, account_key)
+            {
+                if value > 0 {
+                    allocations.push((account_key, value));
+                }
+            }
+        }
+
+        Some(allocations)
+    }
+
     /// Registers an account with the 'CoinManager'.
     ///
     /// NOTE: These changes are saved with the use of the `apply_changes` function.
