@@ -7,8 +7,12 @@ use crate::constructive::entry::entry_kinds::deploy::deploy::Deploy;
 use crate::constructive::entry::entry_kinds::liftup::liftup::Liftup;
 use crate::constructive::entry::entry_kinds::r#move::r#move::Move;
 use crate::constructive::entry::entry_kinds::swapout::swapout::Swapout;
+use crate::constructive::txo::lift::lift_versions::liftv2::cosign::EngineCosigner;
 use crate::constructive::txout_types::payload::payload::Payload;
 use crate::constructive::txout_types::projector::projector::Projector;
+use crate::transmutative::hash::{Hash, HashTag};
+use crate::transmutative::secp::into::IntoScalar;
+use secp::{Point, Scalar};
 use crate::constructive::valtype::val::long_val::long_val::LongVal;
 use crate::constructive::valtype::val::short_val::short_val::ShortVal;
 use crate::executive::exec_ctx::exec_ctx::ExecCtx;
@@ -123,6 +127,43 @@ pub struct SessionPool {
     // Collected account+engine MuSig2 key-path cosignatures for LiftV2 deposits
     // being lifted in this batch, keyed by deposit outpoint.
     pub liftv2_cosigs: std::collections::HashMap<bitcoin::OutPoint, [u8; 64]>,
+
+    // LiftV2 deposits awaiting cosign in this batch (depositor nonces committed
+    // at registration; engine session begun at freeze), keyed by deposit outpoint.
+    pub pending_liftv2: std::collections::HashMap<bitcoin::OutPoint, PendingLiftV2>,
+}
+
+/// A LiftV2 deposit awaiting its account+engine key-path cosignature.
+pub struct PendingLiftV2 {
+    pub account_key: [u8; 32],
+    pub engine_key: [u8; 32],
+    pub client_hiding_nonce: Point,
+    pub client_binding_nonce: Point,
+    /// Set at batch freeze by `prepare_liftv2_cosigns`.
+    pub engine: Option<EngineCosigner>,
+    pub keypath_sighash: Option<[u8; 32]>,
+}
+
+/// Deterministic engine cosign nonces from (engine secret, sighash). Each batch
+/// gives a deposit a unique sighash, so nonces never repeat across sessions.
+/// NOTE: production should prefer fresh CSPRNG nonces; deterministic derivation
+/// here keeps the engine stateless across restarts mid-window.
+fn derive_engine_nonces(engine_secret: [u8; 32], sighash: [u8; 32]) -> Option<(Scalar, Scalar)> {
+    let mut h = engine_secret.to_vec();
+    h.extend(sighash);
+    h.push(0x00);
+    let hiding = h
+        .hash(Some(HashTag::CustomString("Cube/liftv2/enginenonce".to_string())))
+        .into_reduced_scalar()
+        .ok()?;
+    let mut b = engine_secret.to_vec();
+    b.extend(sighash);
+    b.push(0x01);
+    let binding = b
+        .hash(Some(HashTag::CustomString("Cube/liftv2/enginenonce".to_string())))
+        .into_reduced_scalar()
+        .ok()?;
+    Some((hiding, binding))
 }
 
 /// Guarded `SessionPool`.
@@ -177,6 +218,7 @@ impl SessionPool {
             added_entries: Vec::new(),
             added_individual_entry_bls_signatures: Vec::new(),
             liftv2_cosigs: std::collections::HashMap::new(),
+            pending_liftv2: std::collections::HashMap::new(),
         };
 
         // 3 Guard the session pool.
@@ -203,8 +245,9 @@ impl SessionPool {
         // 3 Reset the added individual entry BLS signatures.
         self.added_individual_entry_bls_signatures = Vec::new();
 
-        // 4 Reset the collected LiftV2 cosignatures.
+        // 4 Reset the collected LiftV2 cosignatures + pending cosign sessions.
         self.liftv2_cosigs = std::collections::HashMap::new();
+        self.pending_liftv2 = std::collections::HashMap::new();
 
         // 5 Reset the batch height.
         self.batch_info = None;
@@ -462,6 +505,100 @@ impl SessionPool {
     /// used as its key-path witness when the batch is built.
     pub fn insert_liftv2_cosig(&mut self, outpoint: bitcoin::OutPoint, cosig: [u8; 64]) {
         self.liftv2_cosigs.insert(outpoint, cosig);
+    }
+
+    /// Round 1: register a depositor's committed public nonces for a LiftV2
+    /// deposit being lifted in this batch (the Lift Path cosign begins here).
+    pub fn register_liftv2_nonces(
+        &mut self,
+        outpoint: bitcoin::OutPoint,
+        account_key: [u8; 32],
+        engine_key: [u8; 32],
+        client_hiding_nonce: Point,
+        client_binding_nonce: Point,
+    ) {
+        self.pending_liftv2.insert(
+            outpoint,
+            PendingLiftV2 {
+                account_key,
+                engine_key,
+                client_hiding_nonce,
+                client_binding_nonce,
+                engine: None,
+                keypath_sighash: None,
+            },
+        );
+    }
+
+    /// At batch freeze: for each pending LiftV2 deposit, compute its key-path
+    /// sighash, begin the engine's MuSig2 cosign (engine partial-signs with
+    /// deterministic nonces), and return the material each depositor needs to
+    /// partial-sign in round 2: (sighash, engine_hiding_nonce, engine_binding_nonce).
+    pub async fn prepare_liftv2_cosigns(
+        &mut self,
+        engine_secret: [u8; 32],
+    ) -> Result<std::collections::HashMap<bitcoin::OutPoint, ([u8; 32], Point, Point)>, IntoBatchContainerError>
+    {
+        let sighashes = self.liftv2_keypath_sighashes().await?;
+
+        // Normalize the engine secret to the even-Y point used in the LiftV2 keyagg.
+        let engine_secret_scalar = engine_secret
+            .into_scalar()
+            .map_err(|_| IntoBatchContainerError::AggregateBLSSignatureError)?;
+        let engine_secret_even =
+            engine_secret_scalar.negate_if(engine_secret_scalar.base_point_mul().parity());
+
+        let mut material = std::collections::HashMap::new();
+        for (outpoint, pending) in self.pending_liftv2.iter_mut() {
+            let sighash = match sighashes.get(outpoint) {
+                Some(s) => *s,
+                None => continue,
+            };
+            let (e_hiding, e_binding) = match derive_engine_nonces(engine_secret, sighash) {
+                Some(n) => n,
+                None => continue,
+            };
+            if let Some(engine) = EngineCosigner::begin(
+                pending.account_key,
+                pending.engine_key,
+                engine_secret_even,
+                e_hiding,
+                e_binding,
+                pending.client_hiding_nonce,
+                pending.client_binding_nonce,
+                sighash,
+            ) {
+                let (eh, eb) = engine.engine_public_nonces();
+                pending.engine = Some(engine);
+                pending.keypath_sighash = Some(sighash);
+                material.insert(*outpoint, (sighash, eh, eb));
+            }
+        }
+        Ok(material)
+    }
+
+    /// Round 2: insert a depositor's partial signature, aggregate into the
+    /// key-path cosignature, and record it for the batch builder. Returns true on
+    /// success.
+    pub fn submit_liftv2_partial_sig(
+        &mut self,
+        outpoint: bitcoin::OutPoint,
+        client_partial: Scalar,
+    ) -> bool {
+        if let Some(pending) = self.pending_liftv2.remove(&outpoint) {
+            if let Some(engine) = pending.engine {
+                if let Some(cosig) = engine.complete(client_partial) {
+                    self.liftv2_cosigs.insert(outpoint, cosig);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether every registered LiftV2 deposit has a collected cosignature.
+    pub fn all_liftv2_cosigned(&self) -> bool {
+        self.pending_liftv2.is_empty()
     }
 
     /// Executes a `Liftup` entry in the `SessionPool`.
