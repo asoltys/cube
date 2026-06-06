@@ -487,8 +487,13 @@ impl SessionPool {
         // 12 Convert the payload bits to payload bytes.
         let new_payload_bytes: Bytes = payload_bits.to_ape_payload_bytes();
 
-        // 13 Get prev projectors from sync manager: Not implemented for the time being.
-        let prev_projectors = Vec::<Projector>::new();
+        // 13 Get the prev projectors (covenant tips) to refresh from the sync
+        //    manager. Empty until EMIT_EXIT_TREE_PROJECTORS emits any (so live
+        //    batches are unchanged); when present they are spent as refresh inputs.
+        let prev_projectors = {
+            let _sync_manager = self.sync_manager.lock().await;
+            _sync_manager.projector_tips()
+        };
 
         // 14 Get the executed entries.
         let executed_entries: Vec<Entry> = self.added_entries.clone();

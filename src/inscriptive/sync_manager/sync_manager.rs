@@ -1,5 +1,6 @@
 use crate::{
     constructive::txout_types::payload::payload::{genesis_payload, Payload},
+    constructive::txout_types::projector::projector::Projector,
     inscriptive::sync_manager::errors::construction_error::SMConstructionError,
     operative::run_args::chain::Chain,
 };
@@ -20,6 +21,11 @@ pub struct SyncManager {
 
     // Payload tip.
     payload_tip: Payload,
+
+    // The live projector (exit-tree funding) covenant outputs carried from the
+    // previous batch; each is spent (refreshed) as a prev-projector input in the
+    // next batch. Empty until EMIT_EXIT_TREE_PROJECTORS is enabled.
+    projector_tips: Vec<Projector>,
 
     // In-storage db.
     db: sled::Db,
@@ -61,12 +67,28 @@ impl SyncManager {
                 .unwrap_or_else(|| genesis_payload(chain))
         };
 
+        // 4.b Get the projector tips from the db (bincode Vec<Projector>).
+        let projector_tips: Vec<Projector> = db
+            .get(b"projector_tips")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                bincode::serde::decode_from_slice::<Vec<Projector>, _>(
+                    bytes.as_ref(),
+                    bincode::config::standard(),
+                )
+                .ok()
+                .map(|(v, _)| v)
+            })
+            .unwrap_or_default();
+
         // 5 Construct the sync manager.
         let sync_manager = SyncManager {
             synced: false,
             bitcoin_sync_height_tip,
             cube_batch_sync_height_tip,
             payload_tip,
+            projector_tips,
             db,
         };
 
@@ -142,6 +164,23 @@ impl SyncManager {
         // Update in-db.
         if let Some(payload_bytes) = payload_tip.serialize() {
             let _ = self.db.insert(b"payload_tip", payload_bytes);
+        }
+    }
+
+    /// Returns the live projector covenant tips carried from the previous batch.
+    pub fn projector_tips(&self) -> Vec<Projector> {
+        self.projector_tips.clone()
+    }
+
+    /// Sets the live projector covenant tips (the covenant outputs the next batch
+    /// must refresh). Persisted so the chain of covenants survives restarts.
+    pub fn set_projector_tips(&mut self, projector_tips: Vec<Projector>) {
+        self.projector_tips = projector_tips.clone();
+        if let Ok(bytes) = bincode::serde::encode_to_vec(
+            &projector_tips,
+            bincode::config::standard(),
+        ) {
+            let _ = self.db.insert(b"projector_tips", bytes);
         }
     }
 }
