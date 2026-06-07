@@ -101,4 +101,51 @@ mod musig_vectors {
         println!("EXPECTED_AGG_SIG={}", hx(&agg));
         println!("=== END VECTOR ===");
     }
+
+    // ODD-Y base key: a browser secret whose point has odd Y. The registered
+    // account key is the x-only (even-Y) pubkey, and the keyagg lifts it to even-Y
+    // — so the player's browser must NEGATE its raw secret before projecting/signing.
+    // Half of all real browser keys land here, so the JS even-Y normalization must
+    // reproduce this partial byte-for-byte.
+    #[test]
+    fn refresh_cosign_vector_odd_y_base() {
+        use cube::transmutative::secp::schnorr::LiftScalar;
+        // Forge a raw secret with an ODD-Y point: lift to even, then negate once.
+        let odd_parity = pt(ALICE_PK.replace("02", "03").as_str() /*any odd point*/).parity();
+        let alice_raw_odd = sc(ALICE_SK).lift().negate_if(odd_parity);
+        assert_eq!(alice_raw_odd.base_point_mul().serialize()[0], 0x03, "raw base must be odd-Y");
+        // The even-Y account point (what the keyagg uses) + its x-only account key.
+        let alice_even_pt = alice_raw_odd.base_point_mul().negate_if(odd_parity); // back to even
+        let alice = alice_even_pt.serialize_xonly();
+        let bob = x(BOB_PK);
+        let engine = x(ENGINE_PK);
+        // bob (0251..) vs alice (02cb..): bob=index0, alice=index1, engine=index2.
+        let allocs = [(bob, 20_000u64), (alice, 30_000u64)];
+        let expiry = 800_000u32;
+        let msg = [0x5au8; 32];
+
+        let keyagg = refresh_keyagg(engine, &allocs, expiry).unwrap();
+        let bob_pub = participant_projected_pubkey(pt(BOB_PK), 20_000, 0).unwrap();
+        let alice_pub = participant_projected_pubkey(alice_even_pt, 30_000, 1).unwrap();
+        let engine_pub = engine_projected_pubkey(pt(ENGINE_PK), &allocs).unwrap();
+
+        let mut s = MusigSessionCtx::new(&keyagg, msg).unwrap();
+        s.insert_nonce(bob_pub, sc(B_HN).base_point_mul(), sc(B_BN).base_point_mul());
+        s.insert_nonce(alice_pub, sc(A_HN).base_point_mul(), sc(A_BN).base_point_mul());
+        s.insert_nonce(engine_pub, sc(S_HN).base_point_mul(), sc(S_BN).base_point_mul());
+
+        // sign with the EVEN-Y projected secret (what lift() yields from the raw odd key).
+        let alice_proj_sec = participant_projected_secret(alice_raw_odd.lift(), 30_000, 1).unwrap();
+        let alice_partial = s.partial_sign(alice_proj_sec, sc(A_HN), sc(A_BN)).unwrap();
+
+        println!("=== MUSIG2 ODD-Y BASE VECTOR (browser must normalize) ===");
+        println!("ALICE_BASE_SK_RAW_ODD={}", hx(&alice_raw_odd.serialize()));
+        println!("ALICE_ACCOUNT_XONLY=02{}", hx(&alice));
+        println!("ALICE_PROJ_PUB={}", hx(&alice_pub.serialize()));
+        println!("BOB_PROJ_PUB={}", hx(&bob_pub.serialize()));
+        println!("ENGINE_PROJ_PUB={}", hx(&engine_pub.serialize()));
+        println!("AGG_KEY={}", hx(&keyagg.agg_key().serialize_xonly()));
+        println!("EXPECTED_ALICE_PARTIAL_ODD={}", hx(&alice_partial.serialize()));
+        println!("=== END ODD-Y VECTOR ===");
+    }
 }
