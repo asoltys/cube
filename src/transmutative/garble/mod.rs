@@ -16,6 +16,7 @@
 //! `rg` (the public draw position) a label-committed input.
 
 use crate::transmutative::hash::sha256;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub type Label = [u8; 32];
@@ -51,10 +52,27 @@ struct Gate {
 }
 
 /// One garbled gate's 4 permuted rows.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Row {
     pub tag: Label,
     pub ct: Label,
+}
+
+/// What the Engine publishes to assert a settle: enough for an independent
+/// challenger to rebuild the public circuit, pin the public draw, and evaluate —
+/// learning the disprove secret iff the asserted winner is wrong.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SettleAssertion {
+    pub lo: Vec<u64>,
+    pub hi: Vec<u64>,
+    pub rg: u64,
+    pub claimed_winner: u32,
+    pub tables: Vec<Vec<Row>>,
+    /// active input labels the Engine reveals for (rg, claimed_winner): (wire, label)
+    pub revealed: Vec<(usize, Label)>,
+    /// per-rg-bit (H(label0), H(label1)) commitments, in rg-bit (LSB→MSB) order.
+    pub rg_commitments: Vec<(Label, Label)>,
+    pub disprove_hash: [u8; 32],
 }
 
 /// Value bit-width for `rg` and the band constants (covers the draw space).
@@ -80,6 +98,8 @@ pub struct WinnerVerifier {
     w: Vec<usize>,
     valid: usize,
     w_bits: usize,
+    lo: Vec<u64>,
+    hi: Vec<u64>,
 }
 
 impl WinnerVerifier {
@@ -164,7 +184,7 @@ impl WinnerVerifier {
         let ge_lo = b.gate(rg_lt_lo, one, XOR);
         let valid = b.gate(ge_lo, rg_lt_hi, AND);
 
-        WinnerVerifier { gates: b.gates, n_wires: b.nw, one, zero, rg, w, valid, w_bits }
+        WinnerVerifier { gates: b.gates, n_wires: b.nw, one, zero, rg, w, valid, w_bits, lo: lo.to_vec(), hi: hi.to_vec() }
     }
 
     pub fn gate_count(&self) -> usize {
@@ -207,19 +227,24 @@ impl WinnerVerifier {
             .collect()
     }
 
-    /// Evaluate on public `rg` + the engine's claimed winner index `w`. Returns the
-    /// active output label (== `valid_label(wires)` if the claim is correct, else
-    /// `invalid_label(wires)`).
-    pub fn evaluate(&self, wires: &[[Label; 2]], tables: &[Vec<Row>], rg: u64, w: u64) -> Label {
-        let mut active: HashMap<usize, Label> = HashMap::new();
-        active.insert(self.one, wires[self.one][1]);
-        active.insert(self.zero, wires[self.zero][0]);
+    /// The active input labels the Engine reveals for an asserted (rg, winner).
+    pub fn reveal_active(&self, wires: &[[Label; 2]], rg: u64, w: u64) -> Vec<(usize, Label)> {
+        let mut out = Vec::new();
+        out.push((self.one, wires[self.one][1]));
+        out.push((self.zero, wires[self.zero][0]));
         for k in 0..VALUE_BITS {
-            active.insert(self.rg[k], wires[self.rg[k]][((rg >> k) & 1) as usize]);
+            out.push((self.rg[k], wires[self.rg[k]][((rg >> k) & 1) as usize]));
         }
         for k in 0..self.w_bits {
-            active.insert(self.w[k], wires[self.w[k]][((w >> k) & 1) as usize]);
+            out.push((self.w[k], wires[self.w[k]][((w >> k) & 1) as usize]));
         }
+        out
+    }
+
+    /// Propagate active labels gate-by-gate through the garbled tables (no wire
+    /// secrets) and return the output label — what a challenger computes.
+    pub fn eval_active(&self, tables: &[Vec<Row>], active_in: &HashMap<usize, Label>) -> Label {
+        let mut active = active_in.clone();
         for (gi, g) in self.gates.iter().enumerate() {
             let la = active[&g.a];
             let lb = active[&g.b];
@@ -228,6 +253,49 @@ impl WinnerVerifier {
             active.insert(g.o, xor(&row.ct, &ks(&la, &lb, g.id, b"enc")));
         }
         active[&self.valid]
+    }
+
+    /// Evaluate on public `rg` + claimed winner `w` (engine-side convenience).
+    pub fn evaluate(&self, wires: &[[Label; 2]], tables: &[Vec<Row>], rg: u64, w: u64) -> Label {
+        let active: HashMap<usize, Label> = self.reveal_active(wires, rg, w).into_iter().collect();
+        self.eval_active(tables, &active)
+    }
+
+    /// Engine: build the publishable assertion for (rg, claimed_winner).
+    pub fn assert_settle(&self, wires: &[[Label; 2]], tables: &[Vec<Row>], rg: u64, w: u32) -> SettleAssertion {
+        SettleAssertion {
+            lo: self.lo.clone(),
+            hi: self.hi.clone(),
+            rg,
+            claimed_winner: w,
+            tables: tables.to_vec(),
+            revealed: self.reveal_active(wires, rg, w as u64),
+            rg_commitments: self.rg_commitments(wires),
+            disprove_hash: self.disprove_hash(wires),
+        }
+    }
+
+    /// Challenger: rebuild the public circuit, pin the public draw via the rg
+    /// commitments, evaluate, and return the disprove SECRET iff the asserted
+    /// winner is wrong (the engine cheated). `Ok(None)` = honest settle.
+    pub fn challenge(a: &SettleAssertion, true_rg: u64) -> Result<Option<Label>, String> {
+        let v = WinnerVerifier::new(&a.lo, &a.hi);
+        let active: HashMap<usize, Label> = a.revealed.iter().cloned().collect();
+        // (b) the revealed rg labels must match the commitments for the TRUE draw.
+        for (k, &wire) in v.rg.iter().enumerate() {
+            let lab = active.get(&wire).ok_or("missing rg label")?;
+            let bit = ((true_rg >> k) & 1) as usize;
+            let want = if bit == 0 { a.rg_commitments[k].0 } else { a.rg_commitments[k].1 };
+            if sha256(lab) != want {
+                return Err("revealed rg does not match the true public draw".into());
+            }
+        }
+        let out = v.eval_active(&a.tables, &active);
+        if sha256(&out) == a.disprove_hash {
+            Ok(Some(out)) // disprove secret — the settle is wrong
+        } else {
+            Ok(None) // honest settle
+        }
     }
 
     pub fn valid_label(&self, wires: &[[Label; 2]]) -> Label {
@@ -295,6 +363,30 @@ mod tests {
         let out = v.evaluate(&wires, &tables, rg, 0);
         assert_eq!(out, v.invalid_label(&wires));
         assert_eq!(sha256(&out), v.disprove_hash(&wires));
+    }
+
+    #[test]
+    fn assert_then_challenge_roundtrip() {
+        let lo = [0u64, 1000, 3000, 6000];
+        let hi = [1000u64, 3000, 6000, 10000];
+        let v = WinnerVerifier::new(&lo, &hi);
+        let wires = v.wires(11);
+        let tables = v.garble(&wires);
+        let true_rg = 5000u64; // entry 2
+
+        // honest assertion -> challenger finds no secret.
+        let honest = v.assert_settle(&wires, &tables, true_rg, 2);
+        assert!(WinnerVerifier::challenge(&honest, true_rg).unwrap().is_none());
+
+        // wrong-winner assertion -> challenger derives the disprove secret.
+        let wrong = v.assert_settle(&wires, &tables, true_rg, 0);
+        let secret = WinnerVerifier::challenge(&wrong, true_rg).unwrap();
+        assert!(secret.is_some());
+        assert_eq!(sha256(&secret.unwrap()), wrong.disprove_hash);
+
+        // a faked draw in the assertion is rejected by the rg commitments.
+        let faked = v.assert_settle(&wires, &tables, 500, 0); // engine asserts rg=500
+        assert!(WinnerVerifier::challenge(&faked, true_rg).is_err());
     }
 
     #[test]
