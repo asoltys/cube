@@ -75,8 +75,9 @@ pub struct SettleAssertion {
     pub disprove_hash: [u8; 32],
 }
 
-/// Value bit-width for `rg` and the band constants (covers the draw space).
-pub const VALUE_BITS: usize = 32;
+/// Value bit-width for `rg` and the band constants — 64 bits covers the full draw
+/// space (round_total × house multiplier) for any realistic pot.
+pub const VALUE_BITS: usize = 64;
 
 fn bits_for(n: usize) -> usize {
     let mut b = 1;
