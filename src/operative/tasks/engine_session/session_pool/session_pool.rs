@@ -72,11 +72,18 @@ const EXIT_TREE_EXIT_DELAY: u16 = 144;
 const EXIT_TREE_EXPIRY_WINDOW: u64 = 12_960;
 
 /// Whether the engine EMITS the derived exit-tree funding outputs as on-chain
-/// Projector outputs in the batch. Kept OFF: emitting a covenant output that the
-/// cross-batch N-of-N refresh ("auto-refresh") cannot yet spend would strand its
-/// value. The trees are derived + logged every batch regardless; flipping this on
-/// is gated on the refresh leg landing.
-const EMIT_EXIT_TREE_PROJECTORS: bool = false;
+/// Projector outputs in the batch. OFF by default: emitting a covenant output that
+/// the cross-batch N-of-N refresh ("auto-refresh") cannot yet spend would strand
+/// its value, and flipping it live needs the online per-batch refresh/unroll cosign
+/// transport from all participants. Overridable per-deployment via the
+/// CUBE_EMIT_EXIT_TREE_PROJECTORS env (1/true/yes) for cooperative-participant
+/// settings + tests. The exit trees are derived + logged every batch regardless.
+fn emit_exit_tree_projectors() -> bool {
+    match std::env::var("CUBE_EMIT_EXIT_TREE_PROJECTORS") {
+        Ok(v) => matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
+    }
+}
 
 /// The state of the `SessionPool`.
 pub enum SessionPoolState {
@@ -432,11 +439,11 @@ impl SessionPool {
                     exit_trees.len(),
                     total_vtxos,
                     total_covered,
-                    EMIT_EXIT_TREE_PROJECTORS
+                    emit_exit_tree_projectors()
                 );
             }
 
-            match EMIT_EXIT_TREE_PROJECTORS {
+            match emit_exit_tree_projectors() {
                 // Emit one Projector (exit-tree funding output) per allocated
                 // contract. Gated off until the cross-batch N-of-N refresh + the
                 // projector-state persistence land (else the funds would strand).
@@ -575,6 +582,65 @@ impl SessionPool {
     /// used as its key-path witness when the batch is built.
     pub fn insert_liftv2_cosig(&mut self, outpoint: bitcoin::OutPoint, cosig: [u8; 64]) {
         self.liftv2_cosigs.insert(outpoint, cosig);
+    }
+
+    /// The BIP341 key-path sighash for each prev projector being refreshed in the
+    /// (frozen) batch, keyed by projector outpoint — the messages the participants
+    /// + engine N-of-N co-sign to authorize the auto-refresh.
+    pub async fn projector_refresh_keypath_sighashes(
+        &self,
+    ) -> Result<std::collections::HashMap<bitcoin::OutPoint, [u8; 32]>, IntoBatchContainerError>
+    {
+        let (_height, _bytes, prev_payload, prev_projectors, executed_entries, new_payload, new_projectors, feerate) =
+            self.assemble_batch_args().await?;
+
+        SignedBatchTxn::projector_refresh_keypath_sighashes(
+            &prev_payload,
+            &prev_projectors,
+            &executed_entries,
+            &new_payload,
+            &new_projectors,
+            feerate,
+        )
+        .map_err(IntoBatchContainerError::SignedBatchTxnConstructError)
+    }
+
+    /// Records a collected N-of-N refresh cosignature for a prev projector being
+    /// auto-refreshed (spent) into this batch, used as its key-path witness.
+    pub fn insert_projector_refresh_cosig(&mut self, outpoint: bitcoin::OutPoint, cosig: [u8; 64]) {
+        self.projector_refresh_cosigs.insert(outpoint, cosig);
+    }
+
+    /// The projector covenant outputs this batch would emit (one per allocated
+    /// contract), with their output index resolved against the just-built batch
+    /// tx so the engine can persist them as the next batch's refresh inputs.
+    /// Returns `(contract_id, Projector with location)` for each.
+    pub fn locate_emitted_projectors(
+        &self,
+        batch: &BatchContainer,
+    ) -> Vec<Projector> {
+        let txid = batch.signed_batch_txn.txid();
+        let mut located = Vec::new();
+        for (vout, txout) in batch.signed_batch_txn.tx_outputs().iter().enumerate() {
+            let spk = txout.script_pubkey.as_bytes().to_vec();
+            // Projector outputs are the P2TR covenant outputs after the payload
+            // (output 0). Match by recognizing they are not the payload spk.
+            if vout == 0 {
+                continue; // payload change output
+            }
+            // Heuristic: a 34-byte P2TR (OP_1 <32>) output that isn't the payload.
+            if spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20 {
+                located.push(Projector {
+                    scriptpubkey: spk,
+                    satoshi_amount: txout.value.to_sat(),
+                    location: Some((
+                        bitcoin::OutPoint { txid, vout: vout as u32 },
+                        txout.clone(),
+                    )),
+                });
+            }
+        }
+        located
     }
 
     /// Round 1: register a depositor's committed public nonces for a LiftV2
