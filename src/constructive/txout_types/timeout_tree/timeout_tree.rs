@@ -65,6 +65,23 @@ fn disprove_script(disprove_hash: &[u8; 32], pk: &XOnlyPublicKey) -> ScriptBuf {
         .into_script()
 }
 
+/// The winner-sweep clause: `OP_HASH160 <ripemd160(valid_hash)> OP_EQUALVERIFY <winner_pk> OP_CHECKSIG`.
+/// The mirror of [`disprove_script`]: on an HONEST settle the garbled verifier's
+/// VALID output label is derivable by anyone evaluating the circuit on the true
+/// draw, but only the WINNER's key can spend with it — so the proven winner sweeps
+/// each loser's leaf, while a fraudulent settle exposes the INVALID label instead
+/// (the disprove path) and the winner-sweep stays locked. The two are mutually
+/// exclusive: exactly one of {valid, invalid} is ever derivable for a given draw.
+fn winner_sweep_script(valid_hash: &[u8; 32], winner_pk: &XOnlyPublicKey) -> ScriptBuf {
+    Builder::new()
+        .push_opcode(OP_HASH160)
+        .push_slice(ripemd160::Hash::hash(valid_hash).to_byte_array())
+        .push_opcode(OP_EQUALVERIFY)
+        .push_x_only_key(winner_pk)
+        .push_opcode(OP_CHECKSIG)
+        .into_script()
+}
+
 fn xonly(key: &[u8; 32]) -> Option<XOnlyPublicKey> {
     XOnlyPublicKey::from_slice(key).ok()
 }
@@ -110,11 +127,17 @@ pub struct VtxoLeaf {
     pub expiry_height: u32,
     pub exit_delay: u16,
     pub disprove_hash: Option<[u8; 32]>,
+    /// `(valid_hash, winner_key)` for the winner-sweep path, when this is a LOSER
+    /// leaf in a settled tree. The garbled verifier's VALID-label hash plus the
+    /// claimed winner's key; the proven winner sweeps this leaf with the valid
+    /// label. `None` on the winner's own leaf and on unsettled (genesis) trees.
+    pub winner_sweep: Option<([u8; 32], [u8; 32])>,
     pub taproot: TapRoot,
 }
 
 impl VtxoLeaf {
-    /// Leaf script order: [expiry (0), exit (1), disprove (2, if present)].
+    /// Leaf script order: [expiry (0), exit (1), disprove (2, if present),
+    /// winner-sweep (last, if present)].
     fn build(
         account_key: [u8; 32],
         engine_key: [u8; 32],
@@ -122,6 +145,7 @@ impl VtxoLeaf {
         expiry_height: u32,
         exit_delay: u16,
         disprove_hash: Option<[u8; 32]>,
+        winner_sweep: Option<([u8; 32], [u8; 32])>,
     ) -> Option<Self> {
         let account_pt = account_key.into_point().ok()?;
         let engine_pt = engine_key.into_point().ok()?;
@@ -143,6 +167,10 @@ impl VtxoLeaf {
         if let Some(ref h) = disprove_hash {
             leaves.push(TapLeaf::new(disprove_script(h, &account_x).to_bytes()));
         }
+        if let Some((ref valid_hash, ref winner_key)) = winner_sweep {
+            let winner_x = xonly(winner_key)?;
+            leaves.push(TapLeaf::new(winner_sweep_script(valid_hash, &winner_x).to_bytes()));
+        }
 
         let taproot = TapRoot::key_and_script_path_multi(inner_key, leaves);
 
@@ -153,6 +181,7 @@ impl VtxoLeaf {
             expiry_height,
             exit_delay,
             disprove_hash,
+            winner_sweep,
             taproot,
         })
     }
@@ -179,6 +208,15 @@ impl VtxoLeaf {
     pub fn disprove_spend_elements(&self) -> Option<([u8; 32], Bytes, Bytes)> {
         self.disprove_hash?;
         self.script_path_elements(2)
+    }
+
+    /// `(tapleaf_hash, tapscript, control_block)` for the winner-sweep leaf, if
+    /// this loser leaf has one. It sits after expiry(0), exit(1), and disprove(2,
+    /// when present) — so index 3 in a settled tree, 2 if there's no disprove path.
+    pub fn winner_sweep_spend_elements(&self) -> Option<([u8; 32], Bytes, Bytes)> {
+        self.winner_sweep?;
+        let index = 2 + usize::from(self.disprove_hash.is_some());
+        self.script_path_elements(index)
     }
 
     fn script_path_elements(&self, index: usize) -> Option<([u8; 32], Bytes, Bytes)> {
@@ -213,6 +251,22 @@ impl TimeoutTree {
         exit_delay: u16,
         disprove_hashes: Option<&[[u8; 32]]>,
     ) -> Option<Self> {
+        Self::build_with_sweep(engine_key, allocations, expiry_height, exit_delay, disprove_hashes, None)
+    }
+
+    /// Like [`Self::build`], but also attaches a BitVM3 winner-sweep path to every
+    /// LOSER leaf (the winner's own leaf is left untouched). `winner_sweep` is
+    /// `(valid_hash, winner_key)` — the garbled verifier's VALID-label hash for
+    /// this settle and the claimed winner's key. Used by the settle unroll so the
+    /// proven winner can sweep the whole pot with NO cooperation from the losers.
+    pub fn build_with_sweep(
+        engine_key: [u8; 32],
+        allocations: &[([u8; 32], u64)],
+        expiry_height: u32,
+        exit_delay: u16,
+        disprove_hashes: Option<&[[u8; 32]]>,
+        winner_sweep: Option<([u8; 32], [u8; 32])>,
+    ) -> Option<Self> {
         if allocations.is_empty() {
             return None;
         }
@@ -230,6 +284,10 @@ impl TimeoutTree {
         let mut leaves = Vec::with_capacity(allocations.len());
         for (i, (account_key, value)) in allocations.iter().enumerate() {
             let disprove_hash = disprove_hashes.map(|h| h[i]);
+            // The winner sweeps LOSERS' leaves — the winner's own leaf gets no
+            // sweep path (it would only let them sweep themselves, which the exit
+            // path already does).
+            let leaf_sweep = winner_sweep.filter(|(_, wk)| wk != account_key);
             leaves.push(VtxoLeaf::build(
                 *account_key,
                 engine_key,
@@ -237,6 +295,7 @@ impl TimeoutTree {
                 expiry_height,
                 exit_delay,
                 disprove_hash,
+                leaf_sweep,
             )?);
         }
 

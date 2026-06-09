@@ -73,6 +73,11 @@ pub struct SettleAssertion {
     /// per-rg-bit (H(label0), H(label1)) commitments, in rg-bit (LSB→MSB) order.
     pub rg_commitments: Vec<(Label, Label)>,
     pub disprove_hash: [u8; 32],
+    /// The WINNER-SWEEP hashlock: sha256(valid label). On an HONEST settle the
+    /// winner derives the valid label by evaluating the circuit on the true draw
+    /// (see [`WinnerVerifier::winner_label`]) and opens this lock to sweep losers'
+    /// leaves — the mirror image of `disprove_hash` (which opens only on fraud).
+    pub valid_hash: [u8; 32],
 }
 
 /// Value bit-width for `rg` and the band constants — 64 bits covers the full draw
@@ -273,6 +278,7 @@ impl WinnerVerifier {
             revealed: self.reveal_active(wires, rg, w as u64),
             rg_commitments: self.rg_commitments(wires),
             disprove_hash: self.disprove_hash(wires),
+            valid_hash: self.valid_hash(wires),
         }
     }
 
@@ -299,6 +305,34 @@ impl WinnerVerifier {
         }
     }
 
+    /// Winner/challenger: the MIRROR of [`challenge`]. On an HONEST settle the
+    /// evaluated output IS the valid label — returned here as the WINNER-SWEEP
+    /// secret so the proven winner can open each loser leaf's winner-sweep lock.
+    /// Returns:
+    ///   `Ok(Some(valid_label))` — honest settle; the winner sweeps,
+    ///   `Ok(None)`              — the settle is WRONG (no sweep; losers disprove instead),
+    ///   `Err(..)`               — the revealed draw doesn't match the true public draw.
+    /// Pins the public draw with the same rg-commitment check as `challenge`, so a
+    /// faked `rg` in the assertion is rejected.
+    pub fn winner_label(a: &SettleAssertion, true_rg: u64) -> Result<Option<Label>, String> {
+        let v = WinnerVerifier::new(&a.lo, &a.hi);
+        let active: HashMap<usize, Label> = a.revealed.iter().cloned().collect();
+        for (k, &wire) in v.rg.iter().enumerate() {
+            let lab = active.get(&wire).ok_or("missing rg label")?;
+            let bit = ((true_rg >> k) & 1) as usize;
+            let want = if bit == 0 { a.rg_commitments[k].0 } else { a.rg_commitments[k].1 };
+            if sha256(lab) != want {
+                return Err("revealed rg does not match the true public draw".into());
+            }
+        }
+        let out = v.eval_active(&a.tables, &active);
+        if sha256(&out) == a.valid_hash {
+            Ok(Some(out)) // valid label — honest settle, the winner-sweep secret
+        } else {
+            Ok(None) // not the honest claim (wrong winner) — no winner-sweep
+        }
+    }
+
     pub fn valid_label(&self, wires: &[[Label; 2]]) -> Label {
         wires[self.valid][1]
     }
@@ -309,6 +343,12 @@ impl WinnerVerifier {
     /// The on-chain disprove hashlock value: sha256(invalid label).
     pub fn disprove_hash(&self, wires: &[[Label; 2]]) -> [u8; 32] {
         sha256(&self.invalid_label(wires))
+    }
+    /// The on-chain WINNER-SWEEP hashlock value: sha256(valid label). Opened by
+    /// the honest winner (who derives the valid label via [`Self::winner_label`])
+    /// to sweep losers' leaves. The mirror of [`Self::disprove_hash`].
+    pub fn valid_hash(&self, wires: &[[Label; 2]]) -> [u8; 32] {
+        sha256(&self.valid_label(wires))
     }
     /// Per-`rg`-bit label commitments (H(label0), H(label1)) — pin the public draw.
     pub fn rg_commitments(&self, wires: &[[Label; 2]]) -> Vec<(Label, Label)> {
@@ -331,6 +371,11 @@ impl WinnerVerifier {
 pub struct InstanceCommit {
     pub tables_commit: Label,
     pub disprove_hash: [u8; 32],
+    /// sha256(valid label) for this instance — committed up front so that opening
+    /// an instance verifies its winner-sweep lock too (same integrity the
+    /// cut-and-choose already gives `disprove_hash`). A garbler that fakes this to
+    /// grief the winner's sweep is caught with the same probability.
+    pub valid_hash: [u8; 32],
 }
 
 /// Fiat-Shamir: which of `k` instances to OPEN (verify) — derived from the
@@ -391,6 +436,55 @@ mod tests {
     }
 
     #[test]
+    fn winner_sweep_label_gating() {
+        // The valid label gates the winner-sweep exactly as the invalid label gates
+        // disprove: on an honest claim the evaluated output IS the valid label
+        // (sha256 == valid_hash, != disprove_hash); on a wrong claim it's the
+        // invalid label (the opposite). The two are mutually exclusive.
+        let lo = [0u64, 1000, 3000, 6000];
+        let hi = [1000u64, 3000, 6000, 10000];
+        let v = WinnerVerifier::new(&lo, &hi);
+        let wires = v.wires(23);
+        let tables = v.garble(&wires);
+        let true_rg = 5000u64; // entry 2 wins
+
+        // honest evaluation yields the valid label, NOT the disprove secret.
+        let out = v.evaluate(&wires, &tables, true_rg, 2);
+        assert_eq!(out, v.valid_label(&wires));
+        assert_eq!(sha256(&out), v.valid_hash(&wires));
+        assert_ne!(sha256(&out), v.disprove_hash(&wires));
+        // and the two labels are distinct, so a sweep secret can never disprove.
+        assert_ne!(v.valid_label(&wires), v.invalid_label(&wires));
+        assert_ne!(v.valid_hash(&wires), v.disprove_hash(&wires));
+    }
+
+    #[test]
+    fn winner_label_roundtrip() {
+        let lo = [0u64, 1000, 3000, 6000];
+        let hi = [1000u64, 3000, 6000, 10000];
+        let v = WinnerVerifier::new(&lo, &hi);
+        let wires = v.wires(29);
+        let tables = v.garble(&wires);
+        let true_rg = 5000u64; // entry 2
+
+        // HONEST settle: winner_label yields the valid (sweep) label; challenge None.
+        let honest = v.assert_settle(&wires, &tables, true_rg, 2);
+        let sweep = WinnerVerifier::winner_label(&honest, true_rg).unwrap();
+        assert!(sweep.is_some(), "honest settle exposes the winner-sweep secret");
+        assert_eq!(sha256(&sweep.unwrap()), honest.valid_hash);
+        assert!(WinnerVerifier::challenge(&honest, true_rg).unwrap().is_none());
+
+        // WRONG settle: winner_label None (no sweep), challenge yields disprove secret.
+        let wrong = v.assert_settle(&wires, &tables, true_rg, 0);
+        assert!(WinnerVerifier::winner_label(&wrong, true_rg).unwrap().is_none(), "fraud exposes no sweep secret");
+        assert!(WinnerVerifier::challenge(&wrong, true_rg).unwrap().is_some());
+
+        // a faked draw is rejected by the rg commitments on the sweep path too.
+        let faked = v.assert_settle(&wires, &tables, 500, 2);
+        assert!(WinnerVerifier::winner_label(&faked, true_rg).is_err());
+    }
+
+    #[test]
     fn cut_and_choose_opening_is_unpredictable() {
         let lo = [0u64, 1000, 3000, 6000];
         let hi = [1000u64, 3000, 6000, 10000];
@@ -399,7 +493,7 @@ mod tests {
             .map(|s| {
                 let w = v.wires(s + 1);
                 let t = v.garble(&w);
-                InstanceCommit { tables_commit: v.tables_commit(&t), disprove_hash: v.disprove_hash(&w) }
+                InstanceCommit { tables_commit: v.tables_commit(&t), disprove_hash: v.disprove_hash(&w), valid_hash: v.valid_hash(&w) }
             })
             .collect();
         let open = fiat_shamir_open(&commits, 8);

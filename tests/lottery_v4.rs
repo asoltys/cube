@@ -64,7 +64,7 @@ mod lottery_v4 {
     const KEY_D: u8 = 0x64;
     const KEY_W: u8 = 0x77;
     const DURATION: u8 = 120;
-    const ODDS_DENOM: u64 = 475;
+    const ODDS_DENOM: u64 = 4; // house = rt * 4 -> win region rt is 1/5 of space (20%)
 
     const OPERATOR_HEX: &str = "a55068222783355b755993fe7e1ac0b190d29fa2689a9ebc041ff7252617dd04";
     fn operator_key() -> Vec<u8> {
@@ -88,6 +88,27 @@ mod lottery_v4 {
         while n > 0 { out.push((n & 0xff) as u8); n >>= 8; }
         if out.is_empty() { out.push(0); }
         out
+    }
+    // Minimal numeric push: 0->OP_FALSE, 1..=16->OP_N, else a data push. Required
+    // because small ints (1..16) must use their OP_N opcode (a data push is
+    // non-minimal and rejected at script validation).
+    fn pushnum(n: u64) -> Opcode {
+        use cube::executive::opcode::opcodes::push::{
+            op_false::OP_FALSE, op_true::OP_TRUE,
+            op_2::OP_2, op_3::OP_3, op_4::OP_4, op_5::OP_5, op_6::OP_6, op_7::OP_7, op_8::OP_8,
+            op_9::OP_9, op_10::OP_10, op_11::OP_11, op_12::OP_12, op_13::OP_13, op_14::OP_14,
+            op_15::OP_15, op_16::OP_16,
+        };
+        match n {
+            0 => Opcode::OP_FALSE(OP_FALSE),
+            1 => Opcode::OP_TRUE(OP_TRUE),
+            2 => Opcode::OP_2(OP_2), 3 => Opcode::OP_3(OP_3), 4 => Opcode::OP_4(OP_4),
+            5 => Opcode::OP_5(OP_5), 6 => Opcode::OP_6(OP_6), 7 => Opcode::OP_7(OP_7),
+            8 => Opcode::OP_8(OP_8), 9 => Opcode::OP_9(OP_9), 10 => Opcode::OP_10(OP_10),
+            11 => Opcode::OP_11(OP_11), 12 => Opcode::OP_12(OP_12), 13 => Opcode::OP_13(OP_13),
+            14 => Opcode::OP_14(OP_14), 15 => Opcode::OP_15(OP_15), 16 => Opcode::OP_16(OP_16),
+            _ => push(le_bytes(n)),
+        }
     }
 
     // enter(payable E): NON-CUSTODIAL attribution — shadow_up the caller's claim
@@ -187,7 +208,7 @@ mod lottery_v4 {
         s.push(k(KEY_TOTAL)); s.push(sread());
         e(&mut s, Opcode::OP_SUB(OP_SUB)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [rt]
         e(&mut s, Opcode::OP_DUP(OP_DUP));
-        s.push(push(le_bytes(ODDS_DENOM))); e(&mut s, Opcode::OP_MUL(OP_MUL)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY));
+        s.push(pushnum(ODDS_DENOM)); e(&mut s, Opcode::OP_MUL(OP_MUL)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY));
         e(&mut s, Opcode::OP_ADD(OP_ADD)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); // [space]
         s.push(k(KEY_SEED)); s.push(sread());
         e(&mut s, Opcode::OP_DIV(OP_DIV)); e(&mut s, Opcode::OP_VERIFY(OP_VERIFY)); e(&mut s, Opcode::OP_DROP(OP_DROP)); // [r]
