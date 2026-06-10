@@ -33,7 +33,7 @@ pub const SIGNET_GENESIS_PAYLOAD_AMOUNT: u64 = 70_000;
 // Port number
 pub const MAINNET_PORT: u16 = 6272;
 // Bitcoin block height at which the syncing begins.
-pub const MAINNET_SYNC_START_HEIGHT: u64 = 888_116;
+pub const MAINNET_SYNC_START_HEIGHT: u64 = 953_000;
 // Well-known Engine public key
 pub const MAINNET_ENGINE_PUBLIC_KEY: [u8; 32] = [
     0x8c, 0xee, 0x68, 0x8f, 0x5d, 0x17, 0xb2, 0x54, 0xaf, 0x47, 0xd7, 0xd7, 0xe6, 0xff, 0x3f, 0x96,
